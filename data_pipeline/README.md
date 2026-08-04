@@ -80,10 +80,6 @@ Two further notes on this policy:
 * **The median is category-local.** It is computed from the successfully parsed rows within the same category, because prices vary materially between categories — a Mystery median is a far closer estimate for a broken Mystery price than a catalogue-wide one.
 * **Every repair is logged.** Imputations, drops and unrecognised availability text each print a `[impute]`, `[drop]` or `[warn]` line, so the run output shows exactly which rows were altered and why. On a clean scrape of the live site none of these lines appear — all 174 rows parse cleanly. The behaviour was verified by deliberately corrupting the scraped HTML, which produced logged imputations on the affected rows while the run still completed with a full database.
 
-### Encoding
-
-The site serves UTF-8 but does not declare it in the HTTP header, so `requests` falls back to guessing Latin-1 and titles arrive mangled (`Noahâs Ark`). The response encoding is therefore set explicitly before parsing, which yields the correct `Noah's Ark`.
-
 ---
 
 ## Currency Conversion
@@ -130,14 +126,18 @@ Six queries run **once**, after the full dataset has been loaded and committed �
 
 | # | Query | Clauses demonstrated |
 | --- | --- | --- |
-| 1 | Distinct rating values | `DISTINCT`, `ORDER BY` |
-| 2 | Books rated above four | `SELECT` / `WHERE` |
-| 3 | All books by ascending price | `ORDER BY` |
-| 4 | The five most expensive books | `ORDER BY`, `LIMIT` |
-| 5 | Books priced £20–£40 rated 4 or 5 | `BETWEEN`, `IN` |
-| 6 | Top-rated Mystery books with their category name | `JOIN`, `WHERE`, `ORDER BY` |
+| 1 | Every category in the lookup table | `SELECT`, `LIMIT` |
+| 2 | Books rated above four | `SELECT` / `WHERE`, `LIMIT` |
+| 3 | Books by ascending price | `ORDER BY`, `LIMIT` |
+| 4 | Books priced between £20 and £40 | `WHERE`, `BETWEEN`, `LIMIT` |
+| 5 | The first five books in the table | `LIMIT` |
+| 6 | Distinct Mystery titles with their category name | `DISTINCT`, `JOIN`, `WHERE`, `LIMIT` |
 
-Each query is executed with `sqlite3`, read back into a DataFrame with `pd.read_sql`, printed to the console, and appended to `query_outputs.md` alongside its query string and full row count. The saved file previews the first three rows of each result to stay readable; the row count in every heading is the true total.
+The required clause list is `SELECT`/`WHERE`, `ORDER BY`, `LIMIT`, `DISTINCT` and `IN` **or** `BETWEEN`, plus at least one `JOIN`. `BETWEEN` in query 4 covers the fifth of those, so `IN` is not needed.
+
+Every query carries `LIMIT 5`, which keeps the saved output short enough to read at a glance. Because of that, what `query_outputs.md` records is each query's *complete* result — nothing is trimmed after the fact.
+
+Each query is executed with `sqlite3` via `cursor.execute` / `fetchall`, printed to the console, and appended to `query_outputs.md` with its query string and its rows rendered as a table with column headers. Three of them — the rating filter, the limit query and the join — are additionally read back into DataFrames with `pd.read_sql`, satisfying the "read at least two query results back into pandas" requirement.
 
 ---
 
@@ -147,6 +147,8 @@ The join query is produced twice, by two independent routes:
 
 * **Via SQL** — `pd.read_sql` executes the `JOIN` against SQLite.
 * **Via pandas** — `pd.merge` joins DataFrames built directly from the in-memory scraped records, with no SQL involved at any point. The category id assigned at insert time is carried on the in-memory records, which is what lets the merge reproduce the relational join exactly.
+
+The pandas side mirrors the SQL clause for clause: `drop_duplicates()` for the `DISTINCT`, a boolean mask for the `WHERE`, and `head(5)` for the `LIMIT 5`. If the SQL join is ever edited, the pandas chain has to be edited to match, or the two stop agreeing.
 
 Both results are printed side by side in a single frame and compared with `.equals()`, which reports **`True`**. The comparison is written to `query_outputs.md` as well, so the match is visible without re-running the pipeline.
 

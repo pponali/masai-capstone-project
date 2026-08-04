@@ -5,7 +5,6 @@ import requests
 from bs4 import BeautifulSoup
 import sqlite3
 import pandas as pd
-from statistics import median
 
 #run this script from inside the data_pipeline folder.
 DB_PATH = "books.db"
@@ -13,6 +12,18 @@ OUTPUT_FILE = "query_outputs.md"
 
 #every query string and its output, written to query_outputs.md at the end.
 query_log = []
+
+
+def getMedian(values):
+    """middle value of the list, the average of the two middles when the count is even."""
+    ordered_values = sorted(values)
+    total = len(ordered_values)
+    middle = total // 2
+
+    if total % 2 == 1:
+        return ordered_values[middle]
+
+    return (ordered_values[middle - 1] + ordered_values[middle]) / 2
 
 
 def getConnCursor():
@@ -154,12 +165,12 @@ def main():
             # Step 2: work out the median of each field, None when nothing parsed.
             median_price = None
             if len(parsed_prices) > 0:
-                median_price = median(parsed_prices)
+                median_price = getMedian(parsed_prices)
 
             median_rating = None
             if len(parsed_ratings) > 0:
                 #cast to int so the column stays a 1-5 integer instead of becoming 3.5
-                median_rating = int(median(parsed_ratings))
+                median_rating = int(getMedian(parsed_ratings))
 
             cleaned_books = []
             for book_data in books_data:
@@ -285,7 +296,6 @@ def main():
     merge_join = (merged_books_cat[merged_books_cat["category_name"] == "Mystery"]
                   [["title", "category_name"]]
                   .drop_duplicates()
-                  #head(5) mirrors the LIMIT 5 in the sql above, otherwise the two differ.
                   .head(5)
                   .reset_index(drop=True))
 
