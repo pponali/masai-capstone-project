@@ -3,32 +3,76 @@
 # pyrefly: ignore [missing-import]
 import requests
 from bs4 import BeautifulSoup
-import json
 import sqlite3
 import pandas as pd
+from statistics import median
+from pathlib import Path
+from urllib.parse import urljoin
 
-sqllite_connection = sqlite3.connect("books.db")
-#create the cursor used to execute the sql commands.
-cursor = sqllite_connection.cursor()
-cursor.execute("DROP TABLE IF EXISTS books")
-cursor.execute("DROP TABLE IF EXISTS categories")
+DB_PATH = Path(__file__).parent / "books.db"
+OUTPUT_DIR = Path(__file__).parent / "query_outputs"
+
+#one row per query, saved to query_outputs/queries.csv at the end.
+query_log = []
+
+
+def getConnCursor():
+    """single place that opens the sqlite connection and returns it with its cursor."""
+    connection = sqlite3.connect(DB_PATH)
+    cursor = connection.cursor()
+    cursor.execute("PRAGMA foreign_keys = ON")
+    return connection, cursor
+
+
+def run_query(label, sql):
+    """run the query, print it, and save its output as a csv file."""
+    connection, cursor = getConnCursor()
+    rows = cursor.execute(sql).fetchall()
+    result = pd.read_sql(sql, con=connection)
+    connection.close()
+
+    output_file = f"{len(query_log) + 1}_{label}.csv"
+    result.to_csv(OUTPUT_DIR / output_file, index=False)
+    query_log.append({"label": label, "sql": sql, "row_count": len(rows), "output_file": output_file})
+
+    print(f"\n================= {label} ({len(rows)} rows) ============ \n{sql}\n")
+    print(result.head(10).to_string(index=False))
+    return result
 
 
 def main():
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    sqllite_connection, cursor = getConnCursor()
+    cursor.execute("DROP TABLE IF EXISTS books")
+    cursor.execute("DROP TABLE IF EXISTS categories")
+
+    #Task 4: normalized schema, two tables sharing a primary/foreign key.
+    cursor.execute('''CREATE TABLE categories
+    (category_id INTEGER PRIMARY KEY, category_name TEXT UNIQUE)''')
+
+    cursor.execute('''CREATE TABLE books (book_id INTEGER PRIMARY KEY,
+     title TEXT, price_gbp REAL, price_inr REAL, rating INTEGER,
+     in_stock INTEGER, availability TEXT,
+     category_id INTEGER REFERENCES categories(category_id))''')
+
     # make an request to the website
-    response = requests.get("https://books.toscrape.com")
+    response = requests.get("https://books.toscrape.com", timeout=30)
+    response.raise_for_status()
     #print the response in the text format
     #print(response.text)
 
 
     soup = BeautifulSoup(response.text, 'html.parser')
     #get the components based on the navigation divs to get the categories component.
+    #the nested ul skips the first "Books" link, which is the whole catalogue.
     #iterate only first 10 categories to the list of product for those categories.
-    categories = soup.select("div.side_categories ul li a")[:10]
+    categories = soup.select("div.side_categories ul li ul li a")[:10]
 
-    # Get list of category names by extracting text from the html tags of type anchor tag. 
+    # Get list of category names by extracting text from the html tags of type anchor tag.
     category_data = {}
-    
+    all_books = []
+    all_categories = []
+
 #=================================================================
     #Task 1: Get the categories data
     for category in categories:
@@ -41,30 +85,52 @@ def main():
         # 3. Combine with base URL to get full URL
         full_url = f"https://books.toscrape.com/{link}"
 
-        response = requests.get(full_url)
+        # 4. Follow the "next" link so every page of the category is scraped.
+        category_books = []
+        while full_url:
+            response = requests.get(full_url, timeout=30)
+            response.raise_for_status()
+            #the site serves utf-8 but does not declare it, so requests guesses latin-1.
+            response.encoding = "utf-8"
 
-        category_soup = BeautifulSoup(response.text, 'html.parser')
-        category_books = category_soup.select("article.product_pod")
-        
+            category_soup = BeautifulSoup(response.text, 'html.parser')
+            category_books += category_soup.select("article.product_pod")
+
+            next_link = category_soup.select_one("li.next a")
+            full_url = urljoin(full_url, next_link["href"]) if next_link else None
+
         if len(category_books) > 0:
             books_data = []
             for book in category_books:
-                star_rating_classes = book.find("p", class_="star-rating")
-                rating = star_rating_classes["class"]
-                price_tag = book.find("p", class_="price_color")
-                raw_price = price_tag.get_text(strip=True)
+                # Read every field defensively: a missing tag or an unexpected
+                # class list yields None instead of raising, so one malformed
+                # product card cannot bring the whole pipeline down.
+                try:
+                    star_rating_classes = book.find("p", class_="star-rating")
+                    rating_classes = star_rating_classes["class"] if star_rating_classes else []
+                    raw_rating = rating_classes[1] if len(rating_classes) > 1 else None
 
-                title = book.find("h3").find("a")["title"]
-                availability = book.find("p", class_="instock availability")
-                #print(f"===== Availability of the product =====\n {availability}")
-                if availability:
-                    availability = availability.get_text(strip=True)
-                else:
-                    availability = "Not Available"
+                    price_tag = book.find("p", class_="price_color")
+                    raw_price = price_tag.get_text(strip=True) if price_tag else None
+
+                    title = book.find("h3").find("a")["title"]
+
+                    availability = book.find("p", class_="instock availability")
+                    #print(f"===== Availability of the product =====\n {availability}")
+                    if availability:
+                        availability = availability.get_text(strip=True)
+                    else:
+                        availability = "Not Available"
+                except (AttributeError, KeyError, TypeError) as error:
+                    # The title is the row's identity - without it the record is
+                    # useless, so the card is dropped rather than imputed.
+                    print(f"[drop] unreadable product card in '{category_name}': {error}")
+                    continue
+
                 print(availability)
                 books_data.append({
                     "category": category_name,
-                    "rating": rating[1],
+                    "rating": raw_rating,
                     "price": raw_price,
                     "title": title,
                     "availability": availability
@@ -80,20 +146,59 @@ def main():
 #=================================================================
             #Task 2: Clean the scraped fields into proper types:
 
+            # Pass 1: attempt to parse every row, marking any field that fails
+            # as None so the failures can be counted and imputed afterwards.
             for book_data in books_data:
-                book_data["price"] = book_data["price"].replace("Â£", "").replace("£", "").strip()
-                book_data["price"] = float(book_data["price"])
-                book_data["rating"] = rating_map.get(book_data["rating"], 0)
-                if book_data["availability"] == "In stock":
+                raw_price = book_data.pop("price")
+                try:
+                    raw_price = raw_price.replace("Â£", "").replace("£", "").strip()
+                    book_data["price_gbp"] = float(raw_price)
+                except (AttributeError, ValueError):
+                    print(f"[impute] unparseable price {raw_price!r} for '{book_data['title']}'")
+                    book_data["price_gbp"] = None
+
+                # rating_map returns None for anything outside One..Five
+                book_data["rating"] = rating_map.get(book_data["rating"])
+                if book_data["rating"] is None:
+                    print(f"[impute] unparseable star rating for '{book_data['title']}'")
+
+                # Match on a substring rather than the exact string so wording
+                # like "In stock (19 available)" still resolves to True; anything
+                # that mentions neither state is reported instead of silently
+                # defaulting to False.
+                availability = book_data["availability"].lower()
+                if "in stock" in availability:
                     book_data["in_stock"] = True
                 else:
+                    if "out of stock" not in availability and "unavailable" not in availability:
+                        print(f"[warn] unrecognised availability {book_data['availability']!r} "
+                              f"for '{book_data['title']}' - treated as out of stock")
                     book_data["in_stock"] = False
-                del book_data["availability"]
 
-                if book_data["price"]:
-                    book_data["price_gbp"] = book_data["price"]
-                    del book_data["price"]
+            # Pass 2: median-impute the numeric fields that failed to parse.
+            # Median rather than mean because a handful of extreme prices should
+            # not drag the replacement value; imputing rather than dropping keeps
+            # the row's other correct fields (title, category, stock) in the
+            # dataset. A row is only dropped when the whole category failed to
+            # parse and there is therefore no median to borrow.
+            parsed_prices = [b["price_gbp"] for b in books_data if b["price_gbp"] is not None]
+            parsed_ratings = [b["rating"] for b in books_data if b["rating"] is not None]
+            median_price = median(parsed_prices) if parsed_prices else None
+            median_rating = int(median(parsed_ratings)) if parsed_ratings else None
 
+            cleaned_books = []
+            for book_data in books_data:
+                if book_data["price_gbp"] is None:
+                    book_data["price_gbp"] = median_price
+                if book_data["rating"] is None:
+                    book_data["rating"] = median_rating
+
+                if book_data["price_gbp"] is None or book_data["rating"] is None:
+                    print(f"[drop] no median available to impute '{book_data['title']}'")
+                    continue
+                cleaned_books.append(book_data)
+
+            books_data = cleaned_books
             print(books_data)
             category_data[category_name] = books_data
 #=================================================================
@@ -104,97 +209,54 @@ def main():
                 book["price_inr"] = book["price_gbp"] * 105.50
 #=================================================================
 
-        #Task 4: Design a normalized SQLite schema with at
-        #  least two tables sharing a primary/foreign key 
-        # relationship, for example:
-        
-        cursor.execute('''CREATE TABLE IF NOT EXISTS categories 
-        (category_id INTEGER PRIMARY KEY, category_name TEXT UNIQUE)''')
-
-        cursor.execute('''CREATE TABLE IF NOT EXISTS books (book_id INTEGER PRIMARY KEY,
-         title TEXT, price_gbp REAL, price_inr REAL, rating INTEGER, 
-         in_stock INTEGER, category_id INTEGER REFERENCES categories(category_id))''')
-        
-        #Task 5: Using Python's sqlite3 (or pandas.DataFrame.to_sql), 
-        # insert your cleaned, converted data into this schema. 
+        #Task 5: Using Python's sqlite3 (or pandas.DataFrame.to_sql),
+        # insert your cleaned, converted data into this schema.
         cursor.execute("INSERT INTO categories (category_name) VALUES (?)", (category_name,))
 
         category_id = cursor.lastrowid
+        all_categories.append({"category_id": category_id, "category_name": category_name})
+
         for book in books_data:
-            cursor.execute("INSERT INTO books (title, price_gbp, price_inr, rating, in_stock, category_id) VALUES (?, ?, ?, ?, ?, ?)", 
-            (book["title"], book["price_gbp"], book["price_inr"], book["rating"], book["in_stock"], category_id))
+            #keep the same id in memory so pd.merge can join without touching sql.
+            book["category_id"] = category_id
+            cursor.execute("INSERT INTO books (title, price_gbp, price_inr, rating, in_stock, availability, category_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (book["title"], book["price_gbp"], book["price_inr"], book["rating"], book["in_stock"], book["availability"], category_id))
 
-        #we need to write 5 queries to retrive the data from the database.
-        # 1. Get all categories inserted into the system
-        # each time we are inserting one category 
-        # so products belongs to one category will be inserted and queried.
-        cursor.execute("SELECT * FROM categories")
-        categories = cursor.fetchall()
-        print("\n================= All the categories inserted into the system so far ==================\n", categories)
-        # 2. Get all books where rating is greater than 4.
-        cursor.execute("SELECT * from books where rating > 4")
-        books_rating_greater_than_4 = cursor.fetchall()
-        print("\n================= Books whose rating greater that 4 ============ \n" , books_rating_greater_than_4)
-        # 3. Get all books in ascending order of price.
-        cursor.execute("SELECT * FROM BOOKS ORDER BY price_gbp ASC")
-        books_ascending_price = cursor.fetchall()
-        print("\n================= All books in ascending order of price ============ \n" , books_ascending_price)
-        # 4. Get all books where the price is between 10 and 20.
-        cursor.execute("SELECT * FROM BOOKS where price_gbp between 20 and 40")
-        books_price_range = cursor.fetchall()
-        print("\n================= All books whose price is between 20 and 40 ============ \n" , books_price_range)
-        # 5. Get all books limit 5
-        cursor.execute("SELECT * FROM BOOKS LIMIT 5")
-        books_limit_5 = cursor.fetchall()
-        print("\n================= All books limit 5 ============ \n" , books_limit_5)
-        # 6. Get All books distinct title and whose category is "Travel" with join
-        cursor.execute("SELECT DISTINCT title, category_name FROM books JOIN categories ON books.category_id = categories.category_id WHERE categories.category_name = 'Travel'")
-        books_distinct_title_fantacy = cursor.fetchall()
-        print("\n================= All books distinct title and whose category is Travel ============ \n" , books_distinct_title_fantacy)
-
-        #Task 6: Read back at least two of the above query results into pandas DataFrames using pd.read_sql(...), 
-        # and separately reproduce the join-query's result using pd.merge(...) 
-        # directly on your in-memory DataFrames (no SQL) 
-
-        read_sql_categories = pd.read_sql("SELECT * FROM categories", con=sqllite_connection)
-        print("\n================= Read Categories ============ \n" , read_sql_categories)
-
-        read_sql_books = pd.read_sql("SELECT * FROM books", con=sqllite_connection)
-        print("\n================= Read Books ============ \n" , read_sql_books)
-
-        # Read books with rating greater than 4
-        read_sql_books_rating_gt_4 = pd.read_sql("SELECT * FROM books WHERE rating > 4", con=sqllite_connection)
-        print("\n================= Read Books with rating greater than 4 ============ \n" , read_sql_books_rating_gt_4)
-
-        # Read books in ascending order of price
-        read_sql_books_asc_price = pd.read_sql("SELECT * FROM BOOKS ORDER BY price_gbp ASC", con=sqllite_connection)
-        print("\n================= Read Books in ascending order of price ============ \n" , read_sql_books_asc_price)
-
-        # Read books where the price is between 10 and 20
-        read_sql_books_price_range = pd.read_sql("SELECT * FROM BOOKS where price_gbp between 20 and 40", con=sqllite_connection)
-        print("\n================= Read Books price between 20 and 40 ============ \n" , read_sql_books_price_range)
-
-        # Read books limit 5
-        read_sql_books_limit_5 = pd.read_sql("SELECT * FROM BOOKS LIMIT 5", con=sqllite_connection)
-        print("\n================= Read Books limit 5 ============ \n" , read_sql_books_limit_5)
-
-        # Read all books distinct title and whose category is Travel with join
-        read_sql_books_distinct_title_category = pd.read_sql('''SELECT DISTINCT title, category_name FROM books JOIN categories 
-        ON books.category_id = categories.category_id WHERE categories.category_name = "Travel"''', con=sqllite_connection)
-        print("\n================= Read Books distinct title and whose category is Travel ============ \n" , read_sql_books_distinct_title_category)
-
-        # Reproduce the SQL JOIN in pandas: Merge books and categories on "category_id"
-        merged_books_cat = pd.merge(read_sql_books, read_sql_categories, on="category_id", how="inner")
-
-        # Filter for category "Travel" and select distinct title & category_name
-        travel_books_df = merged_books_cat[merged_books_cat["category_name"] == "Travel"][["title", "category_name"]].drop_duplicates()
-        print("\n================= Pandas Merge Result (Travel Books) ============ \n", travel_books_df)
-
+        all_books += books_data
 
     sqllite_connection.commit()
     sqllite_connection.close()
+    print(f"\ntotal {len(all_books)} books across {len(all_categories)} categories")
 
-    #print(json.dumps(category_data, indent=4))
+    #the queries run once, against the fully loaded database.
+    #each one is executed with sqlite3 and read back with pd.read_sql.
+    run_query("distinct_ratings", "SELECT DISTINCT rating FROM books ORDER BY rating")
+    run_query("select_where", "SELECT title, rating, in_stock FROM books WHERE rating > 4")
+    run_query("order_by_price", "SELECT title, price_gbp FROM books ORDER BY price_gbp ASC")
+    run_query("top_5_costliest", "SELECT title, price_gbp, price_inr FROM books ORDER BY price_gbp DESC LIMIT 5")
+    run_query("price_between_20_and_40",
+              "SELECT title, price_gbp, rating FROM books WHERE price_gbp BETWEEN 20 AND 40 AND rating IN (4, 5) ORDER BY price_gbp")
+    join_sql = ("SELECT category_name, title, rating FROM books "
+                "JOIN categories ON books.category_id = categories.category_id "
+                "WHERE category_name = 'Travel' AND rating >= 4 ORDER BY rating DESC, title")
+    read_sql_join = run_query("join_travel_top_rated", join_sql)
+
+    #Task 6: reproduce the join with pd.merge on the in-memory data (no sql).
+    books_df = pd.DataFrame(all_books)
+    categories_df = pd.DataFrame(all_categories)
+    merged_books_cat = pd.merge(books_df, categories_df, on="category_id", how="inner")
+    merge_join = (merged_books_cat[(merged_books_cat["category_name"] == "Travel") & (merged_books_cat["rating"] >= 4)]
+                  [["category_name", "title", "rating"]]
+                  .sort_values(["rating", "title"], ascending=[False, True])
+                  .reset_index(drop=True))
+
+    side_by_side = pd.concat({"pd.read_sql": read_sql_join, "pd.merge": merge_join}, axis=1)
+    print("\n================= pd.read_sql vs pd.merge ============ \n", side_by_side.to_string())
+    print("\nidentical:", read_sql_join.equals(merge_join))
+
+    side_by_side.to_csv(OUTPUT_DIR / "read_sql_vs_merge.csv", index=False)
+    pd.DataFrame(query_log).to_csv(OUTPUT_DIR / "queries.csv", index=False)
+    print(f"query output saved to {OUTPUT_DIR.name}/")
 
 
 if __name__ == "__main__":
