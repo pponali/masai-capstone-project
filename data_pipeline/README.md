@@ -1,91 +1,152 @@
-# Books Scraper Data Pipeline
+# Module 1 — Data Pipeline
 
-A robust end-to-end Python data pipeline that scrapes book catalog data from [Books to Scrape](https://books.toscrape.com), cleans and transforms the data, stores it in a normalized SQLite relational database, and performs analytical queries and merges using Pandas.
+An end-to-end pipeline that scrapes live product data from [books.toscrape.com](https://books.toscrape.com), cleans it into properly typed columns, enriches it with the project's fixed-rate currency conversion, loads it into a normalized SQLite database, and then queries that database with both SQL and pandas.
 
----
-
-## Technical & Architectural Decisions
-
-### 1. Web Scraping Technology: `requests` + `BeautifulSoup4`
-* **Decision**: Use `requests` for fetching HTTP pages and `BeautifulSoup4` with `html.parser` for HTML extraction, rather than browser automation tools like Playwright or Selenium.
-* **Rationale**: 
-  * `books.toscrape.com` is a static HTML site rendered on the server side.
-  * Lightweight `HTTP GET` requests execute orders of magnitude faster than headless browsers, consuming minimal CPU and RAM.
-  * Zero browser driver dependencies make the pipeline highly portable and CI/CD-friendly.
+The workflow needs: **scrape → clean → convert → store → query**. The source site is built for scraping so no credentials are required.
 
 ---
 
-### 2. Database Schema Design: Normalized Relational Database (2NF/3NF)
-* **Decision**: Create two separate, normalized SQLite tables (`categories` and `books`) linked via a Foreign Key (`category_id`).
-  * **`categories` Table**: `(category_id INTEGER PRIMARY KEY, category_name TEXT UNIQUE)`
-  * **`books` Table**: `(book_id INTEGER PRIMARY KEY, title TEXT, price_gbp REAL, price_inr REAL, rating INTEGER, in_stock INTEGER, category_id INTEGER REFERENCES categories(category_id))`
-* **Rationale**:
-  * **Eliminates Redundancy**: Storing category names once in a lookup table avoids repeating identical string names across thousands of book records.
-  * **Data Integrity**: Foreign key constraints guarantee referential integrity between books and their respective categories.
-  * **Storage & Index Efficiency**: Integer join keys (`category_id`) allow faster indexing and join execution compared to string joins.
+## Contents
 
----
-
-### 3. Data Cleaning & Transformation Pipeline
-* **Rating Normalization**:
-  * **Decision**: Convert text ratings (`"One"`, `"Two"`, ..., `"Five"`) into numeric integers (`1`, `2`, ..., `5`) using a dictionary lookup map.
-  * **Rationale**: Numeric integers enable direct mathematical calculations (e.g., averages, filters like `rating > 4`) without string parsing overhead in database queries.
-* **Currency Cleaning & Conversion**:
-  * **Decision**: Clean encoding artifacts (`Â£`, `£`) from price strings, cast to `float`, and compute a derived column `price_inr` using `1 GBP = 105.50 INR`.
-  * **Rationale**: Preserves both original currency (`price_gbp`) for auditing and localized currency (`price_inr`) for business reporting.
-* **Boolean Flag Conversion**:
-  * **Decision**: Transform text availability string (`"In stock"`) to boolean `1`/`0` (`True`/`False`).
-  * **Rationale**: Simplifies conditional logic in SQL queries (`WHERE in_stock = 1`) and reduces memory footprint in Pandas.
-
----
-
-### 4. Data Processing: SQL & Pandas Integration
-* **Decision**: Use `sqlite3` for SQL execution and `pandas` (`pd.read_sql` and `pd.merge`) for in-memory DataFrames.
-* **Rationale**:
-  * Demonstrates both database-level querying (`SQL JOIN`, `ORDER BY`, `WHERE`) and application-level data manipulation in Pandas.
-  * `pd.merge()` reproduces SQL joins in memory, enabling downstream integration with data science and machine learning workflows without requiring repeated database reads.
-
----
-
-## Pipeline Execution Overview
-
-```
-               [ Website: books.toscrape.com ]
-                              │
-                              ▼
-            [ HTTP GET via requests & BeautifulSoup ]
-                              │
-                              ▼
-            [ Data Cleaning & Field Normalization ]
-             - Rating: String ➔ Integer (1..5)
-             - Price: String ➔ Float (GBP)
-             - Currency: GBP ➔ INR Conversion
-             - Availability: String ➔ Boolean (1/0)
-                              │
-                              ▼
-           [ SQLite Storage (books.db - Normalized) ]
-             - Table 1: categories (category_id, category_name)
-             - Table 2: books (book_id, title, price_gbp, price_inr, ...)
-                              │
-                              ▼
-        [ Pandas Analytics (pd.read_sql & pd.merge) ]
-```
+| File | Description |
+| --- | --- |
+| `scrape.py` | The entire pipeline. Runs end to end with no manual steps. |
+| `books.db` | The generated SQLite database — 174 books across 10 categories. |
+| `query_outputs.md` | Every executed query with its output, rewritten on each run. |
+| `README.md` | This document. |
 
 ---
 
 ## How to Run
 
-1. **Activate Virtual Environment**:
+1. **Activate the virtual environment**
    ```bash
-   source ../venv/bin/activate
+   source ../.venv/bin/activate
    ```
 
-2. **Install Dependencies**:
+2. **Install dependencies**
    ```bash
    pip install -r ../requirements.txt
    ```
+   The pipeline needs `requests`, `beautifulsoup4` and `pandas`. `sqlite3` and `statistics` ship with the standard library.
 
-3. **Run the Data Pipeline**:
+3. **Run the pipeline** — from inside this folder, since the output paths are relative
    ```bash
+   cd data_pipeline
    python3 scrape.py
    ```
+
+The script is self-contained. It drops and recreates `books.db` from scratch on every run, rewrites `query_outputs.md`, and prints its progress and query results to the console. There is no manual copy-pasting at any stage, and a run takes roughly a minute depending on network speed.
+
+---
+
+## Scope of the Scrape
+
+The assignment requires a minimum of 60 rows across at least three categories. This pipeline covers:
+
+* **10 categories**, taken from the sidebar navigation.
+* **174 book rows** in the final dataset, comfortably above the 60-row floor.
+* **The first listing page of each category** — up to 20 books per category. Pagination links are not followed, which is why a large category such as Fiction contributes 20 rows rather than its full 65. The row target is met without it, and the pipeline mechanics being demonstrated are identical either way.
+* **The catalogue-wide "Books" link is excluded.** It is the entire catalogue rather than a category, so including it would insert a meaningless parent row and duplicate books that already appear under their real category.
+* **Per book the script captures** the title, the price as listed in GBP, the star rating as text, the availability text as listed, and the category name.
+
+Titles are read from the anchor's `title` attribute rather than its visible text, because the visible text is truncated with an ellipsis on listing pages.
+
+---
+
+## Cleaning and Type Conversion
+
+Each raw field is converted to a proper type:
+
+* **`price_gbp` (float)** — the currency symbol is stripped and the remainder parsed as a float. Both the plain `£` and its mojibake form `Â£` are removed.
+* **`rating` (int, 1–5)** — the text rating (`One`…`Five`) is mapped through a dictionary to an integer, so ordering and threshold filters behave numerically instead of alphabetically.
+* **`in_stock` (bool)** — derived from the availability text by matching the substring `in stock`, so a page rendering `In stock (19 available)` is treated identically to one rendering a bare `In stock`.
+* **`availability` (text)** — the original as-listed string is *also* stored, so the derived flag can always be traced back to what the site actually said.
+* **`price_inr` (float)** — see the conversion section below.
+
+### Handling Rows That Fail to Parse
+
+The pipeline never crashes on messy input. Parsing happens in two passes: the first attempts every conversion and marks failures as `None`, and the second repairs or discards those rows according to a fixed policy.
+
+| Failure | Policy | Justification |
+| --- | --- | --- |
+| `price` missing or non-numeric | **Median-impute** `price_gbp` | The row's other fields — title, category, rating, stock — are still correct and useful for aggregate analysis, so discarding the whole record would bias the catalogue. The median is used instead of the mean so that a handful of extreme prices cannot drag the replacement value. |
+| `star_rating` absent or outside `One`…`Five` | **Median-impute** `rating` | Same reasoning. The median is cast to `int`, keeping the column a valid 1–5 integer rather than a float such as `3.5`. |
+| The product card is unreadable (no `<h3><a title=…>`) | **Drop the row** | The title is the record's identity. A book with no title cannot be joined, deduplicated or reported on, so there is nothing worth imputing. |
+| A field fails **and** no median exists (every row in the category failed) | **Drop the row** | There is no defensible value to borrow, and inserting `NULL` would break the typed-column requirement. |
+
+Two further notes on this policy:
+
+* **The median is category-local.** It is computed from the successfully parsed rows within the same category, because prices vary materially between categories — a Mystery median is a far closer estimate for a broken Mystery price than a catalogue-wide one.
+* **Every repair is logged.** Imputations, drops and unrecognised availability text each print a `[impute]`, `[drop]` or `[warn]` line, so the run output shows exactly which rows were altered and why. On a clean scrape of the live site none of these lines appear — all 174 rows parse cleanly. The behaviour was verified by deliberately corrupting the scraped HTML, which produced logged imputations on the affected rows while the run still completed with a full database.
+
+### Encoding
+
+The site serves UTF-8 but does not declare it in the HTTP header, so `requests` falls back to guessing Latin-1 and titles arrive mangled (`Noahâs Ark`). The response encoding is therefore set explicitly before parsing, which yields the correct `Noah's Ark`.
+
+---
+
+## Currency Conversion
+
+`price_inr` is derived from `price_gbp` using the project's fixed baseline rate:
+
+> **1 GBP = 105.50 INR**
+
+This is an artificial, project-defined constant for this assignment — not a live or historical market rate. It carries no date reference, requires no external API call and needs no network access. Both currencies are stored so that a value can be read in either unit without re-deriving the conversion at query time.
+
+---
+
+## Database Schema
+
+The database is normalized into two tables sharing a primary/foreign key relationship:
+
+```sql
+categories(category_id INTEGER PRIMARY KEY,
+           category_name TEXT UNIQUE)
+
+books(book_id     INTEGER PRIMARY KEY,
+      title       TEXT,
+      price_gbp   REAL,
+      price_inr   REAL,
+      rating      INTEGER,
+      in_stock    INTEGER,
+      availability TEXT,
+      category_id INTEGER REFERENCES categories(category_id))
+```
+
+Design decisions behind it:
+
+* **Normalization eliminates redundancy.** Each category name is stored once in a lookup table instead of being repeated across every one of its books, and the `UNIQUE` constraint prevents duplicate parents at the schema level.
+* **Integer join keys** make the join cheaper to index and execute than a string join would be.
+* **`in_stock` is stored as an integer** because SQLite has no dedicated boolean type; the conversion happens at the insertion boundary.
+* **The schema is dropped and recreated on every run**, which guarantees reproducible output and prevents duplicate rows accumulating across runs. The trade-off is that no history is retained between executions.
+* **Every scraped value is bound as a parameter**, never interpolated into a statement string, so titles containing quotes or other punctuation cannot be interpreted as SQL.
+
+---
+
+## SQL Queries
+
+Six queries run **once**, after the full dataset has been loaded and committed — not inside the scraping loop, so each one reports against the complete database rather than a partially filled one. Between them they cover every required clause:
+
+| # | Query | Clauses demonstrated |
+| --- | --- | --- |
+| 1 | Distinct rating values | `DISTINCT`, `ORDER BY` |
+| 2 | Books rated above four | `SELECT` / `WHERE` |
+| 3 | All books by ascending price | `ORDER BY` |
+| 4 | The five most expensive books | `ORDER BY`, `LIMIT` |
+| 5 | Books priced £20–£40 rated 4 or 5 | `BETWEEN`, `IN` |
+| 6 | Top-rated Mystery books with their category name | `JOIN`, `WHERE`, `ORDER BY` |
+
+Each query is executed with `sqlite3`, read back into a DataFrame with `pd.read_sql`, printed to the console, and appended to `query_outputs.md` alongside its query string and full row count. The saved file previews the first three rows of each result to stay readable; the row count in every heading is the true total.
+
+---
+
+## SQL and Pandas Equivalence
+
+The join query is produced twice, by two independent routes:
+
+* **Via SQL** — `pd.read_sql` executes the `JOIN` against SQLite.
+* **Via pandas** — `pd.merge` joins DataFrames built directly from the in-memory scraped records, with no SQL involved at any point. The category id assigned at insert time is carried on the in-memory records, which is what lets the merge reproduce the relational join exactly.
+
+Both results are printed side by side in a single frame and compared with `.equals()`, which reports **`True`**. The comparison is written to `query_outputs.md` as well, so the match is visible without re-running the pipeline.
+
