@@ -6,54 +6,26 @@ from bs4 import BeautifulSoup
 import sqlite3
 import pandas as pd
 from statistics import median
-from pathlib import Path
-from urllib.parse import urljoin
 
-DB_PATH = Path(__file__).parent / "books.db"
-OUTPUT_DIR = Path(__file__).parent / "query_outputs"
+#run this script from inside the data_pipeline folder.
+DB_PATH = "books.db"
+OUTPUT_FILE = "query_outputs.md"
 
-#one row per query, saved to query_outputs/queries.csv at the end.
+#every query string and its output, written to query_outputs.md at the end.
 query_log = []
 
 
 def getConnCursor():
-    """single place that opens the sqlite connection and returns it with its cursor."""
+    """common place that opens the sqlite connection and returns it with its cursor."""
     connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
-    cursor.execute("PRAGMA foreign_keys = ON")
     return connection, cursor
 
 
-def run_query(label, sql):
-    """run the query, print it, and save its output as a csv file."""
-    connection, cursor = getConnCursor()
-    rows = cursor.execute(sql).fetchall()
-    result = pd.read_sql(sql, con=connection)
-    connection.close()
-
-    output_file = f"{len(query_log) + 1}_{label}.csv"
-    result.to_csv(OUTPUT_DIR / output_file, index=False)
-    query_log.append({"label": label, "sql": sql, "row_count": len(rows), "output_file": output_file})
-
-    print(f"\n================= {label} ({len(rows)} rows) ============ \n{sql}\n")
-    print(result.head(10).to_string(index=False))
-    return result
-
-
 def main():
-    OUTPUT_DIR.mkdir(exist_ok=True)
     sqllite_connection, cursor = getConnCursor()
     cursor.execute("DROP TABLE IF EXISTS books")
     cursor.execute("DROP TABLE IF EXISTS categories")
-
-    #Task 4: normalized schema, two tables sharing a primary/foreign key.
-    cursor.execute('''CREATE TABLE categories
-    (category_id INTEGER PRIMARY KEY, category_name TEXT UNIQUE)''')
-
-    cursor.execute('''CREATE TABLE books (book_id INTEGER PRIMARY KEY,
-     title TEXT, price_gbp REAL, price_inr REAL, rating INTEGER,
-     in_stock INTEGER, availability TEXT,
-     category_id INTEGER REFERENCES categories(category_id))''')
 
     # make an request to the website
     response = requests.get("https://books.toscrape.com", timeout=30)
@@ -64,12 +36,10 @@ def main():
 
     soup = BeautifulSoup(response.text, 'html.parser')
     #get the components based on the navigation divs to get the categories component.
-    #the nested ul skips the first "Books" link, which is the whole catalogue.
     #iterate only first 10 categories to the list of product for those categories.
-    categories = soup.select("div.side_categories ul li ul li a")[:10]
+    categories = soup.select("div.side_categories ul li ul li a")[1:11]
 
     # Get list of category names by extracting text from the html tags of type anchor tag.
-    category_data = {}
     all_books = []
     all_categories = []
 
@@ -85,19 +55,14 @@ def main():
         # 3. Combine with base URL to get full URL
         full_url = f"https://books.toscrape.com/{link}"
 
-        # 4. Follow the "next" link so every page of the category is scraped.
-        category_books = []
-        while full_url:
-            response = requests.get(full_url, timeout=30)
-            response.raise_for_status()
-            #the site serves utf-8 but does not declare it, so requests guesses latin-1.
-            response.encoding = "utf-8"
+        # 4. Get the listing page of the category and pick every product on it.
+        response = requests.get(full_url, timeout=30)
+        response.raise_for_status()
+        #the site serves utf-8 but does not declare it, so requests guesses latin-1.
+        response.encoding = "utf-8"
 
-            category_soup = BeautifulSoup(response.text, 'html.parser')
-            category_books += category_soup.select("article.product_pod")
-
-            next_link = category_soup.select_one("li.next a")
-            full_url = urljoin(full_url, next_link["href"]) if next_link else None
+        category_soup = BeautifulSoup(response.text, 'html.parser')
+        category_books = category_soup.select("article.product_pod")
 
         if len(category_books) > 0:
             books_data = []
@@ -127,7 +92,7 @@ def main():
                     print(f"[drop] unreadable product card in '{category_name}': {error}")
                     continue
 
-                print(availability)
+                #print(availability)
                 books_data.append({
                     "category": category_name,
                     "rating": raw_rating,
@@ -136,13 +101,7 @@ def main():
                     "availability": availability
                 })
             
-            rating_map = {
-                "One": 1,
-                "Two": 2,
-                "Three": 3,
-                "Four": 4,
-                "Five": 5
-            }
+            
 #=================================================================
             #Task 2: Clean the scraped fields into proper types:
 
@@ -156,7 +115,13 @@ def main():
                 except (AttributeError, ValueError):
                     print(f"[impute] unparseable price {raw_price!r} for '{book_data['title']}'")
                     book_data["price_gbp"] = None
-
+                rating_map = {
+                    "One": 1,
+                    "Two": 2,
+                    "Three": 3,
+                    "Four": 4,
+                    "Five": 5
+                }
                 # rating_map returns None for anything outside One..Five
                 book_data["rating"] = rating_map.get(book_data["rating"])
                 if book_data["rating"] is None:
@@ -175,16 +140,26 @@ def main():
                               f"for '{book_data['title']}' - treated as out of stock")
                     book_data["in_stock"] = False
 
-            # Pass 2: median-impute the numeric fields that failed to parse.
-            # Median rather than mean because a handful of extreme prices should
-            # not drag the replacement value; imputing rather than dropping keeps
-            # the row's other correct fields (title, category, stock) in the
-            # dataset. A row is only dropped when the whole category failed to
-            # parse and there is therefore no median to borrow.
-            parsed_prices = [b["price_gbp"] for b in books_data if b["price_gbp"] is not None]
-            parsed_ratings = [b["rating"] for b in books_data if b["rating"] is not None]
-            median_price = median(parsed_prices) if parsed_prices else None
-            median_rating = int(median(parsed_ratings)) if parsed_ratings else None
+            #get the medians for rating and price since they are numeric data types at this moment.
+            # Step 1: collect the values that did parse, they are what the median is built from.
+            parsed_prices = []
+            parsed_ratings = []
+            for book_data in books_data:
+                if book_data["price_gbp"] is not None:
+                    parsed_prices.append(book_data["price_gbp"])
+
+                if book_data["rating"] is not None:
+                    parsed_ratings.append(book_data["rating"])
+
+            # Step 2: work out the median of each field, None when nothing parsed.
+            median_price = None
+            if len(parsed_prices) > 0:
+                median_price = median(parsed_prices)
+
+            median_rating = None
+            if len(parsed_ratings) > 0:
+                #cast to int so the column stays a 1-5 integer instead of becoming 3.5
+                median_rating = int(median(parsed_ratings))
 
             cleaned_books = []
             for book_data in books_data:
@@ -199,14 +174,25 @@ def main():
                 cleaned_books.append(book_data)
 
             books_data = cleaned_books
-            print(books_data)
-            category_data[category_name] = books_data
+
 #=================================================================
         #Task 3: 
             # GBP to INR conversion
             # 1GBP = 105.50 INR
             for book in books_data:
                 book["price_inr"] = book["price_gbp"] * 105.50
+#=================================================================
+
+        #Task 4: Design a normalized SQLite schema with at least two tables
+        # sharing a primary/foreign key relationship. IF NOT EXISTS keeps this
+        # a no-op after the first category, the tables are dropped once in main.
+        cursor.execute('''CREATE TABLE IF NOT EXISTS categories
+        (category_id INTEGER PRIMARY KEY, category_name TEXT UNIQUE)''')
+
+        cursor.execute('''CREATE TABLE IF NOT EXISTS books (book_id INTEGER PRIMARY KEY,
+         title TEXT, price_gbp REAL, price_inr REAL, rating INTEGER,
+         in_stock INTEGER, availability TEXT,
+         category_id INTEGER REFERENCES categories(category_id))''')
 #=================================================================
 
         #Task 5: Using Python's sqlite3 (or pandas.DataFrame.to_sql),
@@ -228,35 +214,97 @@ def main():
     sqllite_connection.close()
     print(f"\ntotal {len(all_books)} books across {len(all_categories)} categories")
 
-    #the queries run once, against the fully loaded database.
-    #each one is executed with sqlite3 and read back with pd.read_sql.
-    run_query("distinct_ratings", "SELECT DISTINCT rating FROM books ORDER BY rating")
-    run_query("select_where", "SELECT title, rating, in_stock FROM books WHERE rating > 4")
-    run_query("order_by_price", "SELECT title, price_gbp FROM books ORDER BY price_gbp ASC")
-    run_query("top_5_costliest", "SELECT title, price_gbp, price_inr FROM books ORDER BY price_gbp DESC LIMIT 5")
-    run_query("price_between_20_and_40",
-              "SELECT title, price_gbp, rating FROM books WHERE price_gbp BETWEEN 20 AND 40 AND rating IN (4, 5) ORDER BY price_gbp")
-    join_sql = ("SELECT category_name, title, rating FROM books "
-                "JOIN categories ON books.category_id = categories.category_id "
-                "WHERE category_name = 'Travel' AND rating >= 4 ORDER BY rating DESC, title")
-    read_sql_join = run_query("join_travel_top_rated", join_sql)
+    #Task 5 continued: the queries run once, against the fully loaded database.
+    sqllite_connection, cursor = getConnCursor()
 
-    #Task 6: reproduce the join with pd.merge on the in-memory data (no sql).
+    # 1. Get all categories inserted into the system
+    categories_sql = "SELECT * FROM categories LIMIT 5"
+    cursor.execute(categories_sql)
+    all_categories_rows = cursor.fetchall()
+    print("\n================= All the categories inserted into the system ============ \n", all_categories_rows)
+    query_log.append(("all_categories", categories_sql,
+                      pd.DataFrame(all_categories_rows, columns=[column[0] for column in cursor.description]).to_string(index=False)))
+
+    # 2. Get all books where rating is greater than 4.
+    rating_sql = "SELECT * FROM books WHERE rating > 4 LIMIT 5"
+    cursor.execute(rating_sql)
+    books_rating_greater_than_4 = cursor.fetchall()
+    print("\n================= Books whose rating is greater than 4 ============ \n", books_rating_greater_than_4)
+    query_log.append(("books_rating_greater_than_4", rating_sql,
+                      pd.DataFrame(books_rating_greater_than_4, columns=[column[0] for column in cursor.description]).to_string(index=False)))
+
+    # 3. Get all books in ascending order of price.
+    order_by_sql = "SELECT * FROM books ORDER BY price_gbp ASC LIMIT 5"
+    cursor.execute(order_by_sql)
+    books_ascending_price = cursor.fetchall()
+    print("\n================= All books in ascending order of price ============ \n", books_ascending_price)
+    query_log.append(("books_ascending_price", order_by_sql,
+                      pd.DataFrame(books_ascending_price, columns=[column[0] for column in cursor.description]).to_string(index=False)))
+
+    # 4. Get all books where the price is between 20 and 40.
+    between_sql = "SELECT * FROM books WHERE price_gbp BETWEEN 20 AND 40 LIMIT 5"
+    cursor.execute(between_sql)
+    books_price_range = cursor.fetchall()
+    print("\n================= All books whose price is between 20 and 40 ============ \n", books_price_range)
+    query_log.append(("books_price_between_20_and_40", between_sql,
+                      pd.DataFrame(books_price_range, columns=[column[0] for column in cursor.description]).to_string(index=False)))
+
+    # 5. Get all books limit 5
+    limit_sql = "SELECT * FROM books LIMIT 5"
+    cursor.execute(limit_sql)
+    books_limit_5 = cursor.fetchall()
+    print("\n================= All books limit 5 ============ \n", books_limit_5)
+    query_log.append(("books_limit_5", limit_sql,
+                      pd.DataFrame(books_limit_5, columns=[column[0] for column in cursor.description]).to_string(index=False)))
+
+    # 6. Get all books distinct title and whose category is "Mystery" with join
+    join_sql = ("SELECT DISTINCT title, category_name FROM books "
+                "JOIN categories ON books.category_id = categories.category_id "
+                "WHERE categories.category_name = 'Mystery' LIMIT 5")
+    cursor.execute(join_sql)
+    books_distinct_title_mystery = cursor.fetchall()
+    print("\n================= All distinct book titles in the Mystery category ============ \n", books_distinct_title_mystery)
+    query_log.append(("join_distinct_mystery_titles", join_sql,
+                      pd.DataFrame(books_distinct_title_mystery, columns=[column[0] for column in cursor.description]).to_string(index=False)))
+
+    #Task 6: read the query results back into pandas DataFrames.
+    read_sql_books_rating_gt_4 = pd.read_sql(rating_sql, con=sqllite_connection)
+    print("\n================= Read Books with rating greater than 4 ============ \n", read_sql_books_rating_gt_4)
+
+    read_sql_books_limit_5 = pd.read_sql(limit_sql, con=sqllite_connection)
+    print("\n================= Read Books limit 5 ============ \n", read_sql_books_limit_5)
+
+    read_sql_join = pd.read_sql(join_sql, con=sqllite_connection)
+    print("\n================= Read distinct Mystery titles with join ============ \n", read_sql_join)
+    sqllite_connection.close()
+
+    #reproduce the same join with pd.merge on the in-memory data, no sql involved.
     books_df = pd.DataFrame(all_books)
     categories_df = pd.DataFrame(all_categories)
     merged_books_cat = pd.merge(books_df, categories_df, on="category_id", how="inner")
-    merge_join = (merged_books_cat[(merged_books_cat["category_name"] == "Travel") & (merged_books_cat["rating"] >= 4)]
-                  [["category_name", "title", "rating"]]
-                  .sort_values(["rating", "title"], ascending=[False, True])
+    merge_join = (merged_books_cat[merged_books_cat["category_name"] == "Mystery"]
+                  [["title", "category_name"]]
+                  .drop_duplicates()
+                  #head(5) mirrors the LIMIT 5 in the sql above, otherwise the two differ.
+                  .head(5)
                   .reset_index(drop=True))
 
+    #show both results next to each other and check they are the same.
     side_by_side = pd.concat({"pd.read_sql": read_sql_join, "pd.merge": merge_join}, axis=1)
+    is_identical = read_sql_join.equals(merge_join)
     print("\n================= pd.read_sql vs pd.merge ============ \n", side_by_side.to_string())
-    print("\nidentical:", read_sql_join.equals(merge_join))
+    print("\nidentical:", is_identical)
+    query_log.append(("pd.read_sql vs pd.merge", join_sql,
+                      f"{side_by_side.to_string()}\n\nequals -> {is_identical}"))
 
-    side_by_side.to_csv(OUTPUT_DIR / "read_sql_vs_merge.csv", index=False)
-    pd.DataFrame(query_log).to_csv(OUTPUT_DIR / "queries.csv", index=False)
-    print(f"query output saved to {OUTPUT_DIR.name}/")
+    #save every query string with its output.
+    with open(OUTPUT_FILE, "w") as output:
+        output.write("# SQL Queries and Their Output\n")
+        for number, (label, sql, rows) in enumerate(query_log, start=1):
+            output.write(f"\n## {number}. {label}\n"
+                         f"```sql\n{sql}\n```\n"
+                         f"```\n{rows}\n```\n")
+    print(f"query output saved to {OUTPUT_FILE}")
 
 
 if __name__ == "__main__":
