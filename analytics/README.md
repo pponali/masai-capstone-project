@@ -36,12 +36,14 @@ Measured on the 891-row raw dataset:
 
 Histograms and box plots are produced for both `age` and `fare`.
 
-**IQR outlier counts** using `[Q1 − 1.5×IQR, Q3 + 1.5×IQR]`:
+**IQR outlier counts** using `[Q1 − 1.5×IQR, Q3 + 1.5×IQR]`. Both figures are reported for `age`, because the count depends on whether it is measured before or after the missing ages are imputed:
 
-| Column | Outliers |
-| --- | ---: |
-| `age` | 11 |
-| `fare` | 116 |
+| Column | Outliers (raw) | Outliers (cleaned frame) | IQR range |
+| --- | ---: | ---: | --- |
+| `age` | 11 | 65 | [20.125, 38.0] raw → [22.0, 35.0] imputed |
+| `fare` | 114 | 114 | [7.90, 31.00] |
+
+Imputing the 177 missing ages at the median adds a large block of values at the centre of the distribution, which narrows the interquartile range from 17.875 to 13.0 and therefore pulls the whiskers in. The extra 54 points counted as outliers are ordinary ages that were inside the whiskers before imputation — they are an artefact of the imputation, not newly discovered extreme values. `fare` has no missing values, so its count is unaffected at 114.
 
 **Fare skewness** — mean **32.10**, median **14.45**, mode **8.05**. The ordering is **mode < median < mean**, which is the signature of a **right-skewed (positively skewed)** distribution: a long tail of expensive first-class tickets drags the mean well above the median, while the bulk of passengers paid single-digit fares.
 
