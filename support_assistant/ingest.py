@@ -6,11 +6,15 @@ from groq import Groq
 from langgraph.graph import StateGraph, START, END
 from models import FinalAnswerSchema
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+docs_dir = os.path.join(BASE_DIR, "docs")
+chroma_dir = os.path.join(BASE_DIR, "chroma_db")
+
 # Initialize SentenceTransformer model
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 # Initialize ChromaDB persistent client
-client = chromadb.PersistentClient(path="./chroma_db")
+client = chromadb.PersistentClient(path=chroma_dir)
 try:
     client.delete_collection("support_documents")
 except Exception:
@@ -20,7 +24,7 @@ collection = client.get_or_create_collection("support_documents")
 
 # Ingest documents from docs directory
 i = 0
-for root, dirs, files in os.walk("docs"):
+for root, dirs, files in os.walk(docs_dir):
     for file in files:
         if file.endswith(".txt"):
             file_path = os.path.join(root, file)
