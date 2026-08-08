@@ -1,9 +1,8 @@
-requests
-BeautifulSoup4
-pandas
-seaborn
 sentence-transformers
 chromadb
 langgraph
 langchain-community
 groq
+fastapi
+uvicorn
+pydantic
