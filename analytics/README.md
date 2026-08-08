@@ -77,7 +77,29 @@ That renders as this.
 | 02_modeling.ipynb | Reads that same titanic.csv and runs the modeling, tuning, regression side task and final save. |
 | titanic.csv | The offline copy of the dataset, written straight after loading so grading works without internet. |
 | titanic_survival_pipeline.pkl | The saved trained pipeline, preprocessing and classifier together in one object. |
+| charts/ | The 14 saved chart images, written by the notebooks themselves. |
 | README.md | This file. |
+
+Every chart is saved to disk as a PNG by the cell that draws it, using
+plt.savefig just before plt.show, so the images are regenerated whenever the
+notebooks are rerun rather than being exported by hand.
+
+| File in charts/ | Chart | Notebook |
+| --- | --- | --- |
+| 01_age_histogram.png | Distribution of age | 01_eda |
+| 02_age_boxplot.png | Box plot of age, showing the IQR outliers | 01_eda |
+| 03_fare_histogram.png | Distribution of fare | 01_eda |
+| 04_fare_boxplot.png | Box plot of fare | 01_eda |
+| 05_correlation_matrix.png | The 6 by 6 correlation matrix | 01_eda |
+| 06_survival_rate_by_sex.png | Data story chart 1 | 01_eda |
+| 07_survival_rate_by_class.png | Data story chart 2 | 01_eda |
+| 08_age_distribution_by_survival.png | Data story chart 3 | 01_eda |
+| 09_age_vs_fare_by_survival.png | Data story chart 4 | 01_eda |
+| 10_correlation_heatmap.png | Correlation heatmap | 01_eda |
+| 11_survival_rate_by_sex_and_class.png | Data story chart 5 | 01_eda |
+| 12_decision_tree.png | The decision tree drawn with plot_tree | 02_modeling |
+| 13_roc_curves.png | ROC curves for all three classifiers | 02_modeling |
+| 14_residual_plot.png | Residual plot for the fare regression | 02_modeling |
 
 Install the libraries and run the notebooks in order.
 
