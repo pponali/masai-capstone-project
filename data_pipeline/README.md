@@ -156,17 +156,17 @@ categories = soup.select("div.side_categories ul li ul li a")[1:11]
 The slice [1:11] does two things at once. It skips index 0 and it stops at 10
 categories.
 
-Index 0 is skipped on purpose. That first link is the catalogue-wide "Books"
-link, which is not a real category. It is the parent that holds every book on
-the site. If it were included it would insert a meaningless parent row in the
-categories table and duplicate books that already appear under their true
-category.
+**Design decision: index 0 is skipped on purpose.** That first link is the
+catalogue-wide "Books" link, which is not a real category. It is the parent that
+holds every book on the site. If it were included it would insert a meaningless
+parent row in the categories table and duplicate books that already appear under
+their true category.
 
-Only the first listing page of each category is read. Pagination links are not
-followed. This is why a large category like Fiction contributes 20 rows here
-instead of its full 65 rows on the site. The 60 row target is already met
-without pagination and the pipeline mechanics being demonstrated are exactly the
-same either way.
+**Design decision: only the first listing page of each category is read, and
+pagination links are not followed.** This is why a large category like Fiction
+contributes 20 rows here instead of its full 65 rows on the site. The 60 row
+target is already met without pagination and the pipeline mechanics being
+demonstrated are exactly the same either way.
 
 For each book on a page the script captures five things.
 
@@ -178,8 +178,8 @@ For each book on a page the script captures five things.
 | availability | The p tag with class instock availability |
 | category | The sidebar link text, carried down from the loop |
 
-One detail worth explaining. The title is read from the title attribute and not
-from the visible text of the link.
+**Design decision: the title is read from the title attribute, not from the
+visible text of the link.**
 
 ```python
 title = book.find("h3").find("a")["title"]
@@ -190,7 +190,7 @@ title shows as "The Bachelor Girl's Guide to ..." instead of the full name. The
 title attribute always holds the complete untruncated title, which is why it is
 the one used.
 
-Another detail is the encoding line.
+**Design decision: the encoding is set by hand rather than left to requests.**
 
 ```python
 response.encoding = "utf-8"
@@ -225,9 +225,9 @@ raw_price = raw_price.replace("Â£", "").replace("£", "").strip()
 book_data["price_gbp"] = float(raw_price)
 ```
 
-Both the plain £ and the mojibake Â£ are removed. The encoding fix in Section 3
-should mean Â£ never appears, but removing both costs nothing and makes the
-parser safe even if the encoding fix is ever lost.
+**Design decision: both the plain £ and the mojibake Â£ are removed.** The
+encoding fix in Section 3 should mean Â£ never appears, but removing both costs
+nothing and makes the parser safe even if the encoding fix is ever lost.
 
 Rating cleaning maps the English word to a number through a dictionary.
 
@@ -236,12 +236,14 @@ rating_map = {"One": 1, "Two": 2, "Three": 3, "Four": 4, "Five": 5}
 book_data["rating"] = rating_map.get(book_data["rating"])
 ```
 
-This matters because of how sorting works. As text, "Four" sorts before "One"
-and "Three" sorts before "Two", which is alphabetical nonsense. As integers,
-4 sorts after 3 correctly, and a filter like rating > 4 becomes possible. That
-exact filter is used in query 2.
+**Design decision: the rating is stored as an integer, not as the original
+word.** This matters because of how sorting works. As text, "Four" sorts before
+"One" and "Three" sorts before "Two", which is alphabetical nonsense. As
+integers, 4 sorts after 3 correctly, and a filter like rating > 4 becomes
+possible. That exact filter is used in query 2.
 
-Stock cleaning uses a substring check rather than an exact string match.
+**Design decision: stock is detected with a substring check, not an exact string
+match.**
 
 ```python
 availability = book_data["availability"].lower()
@@ -254,11 +256,11 @@ say "In stock" while a product page says "In stock (19 available)". An exact
 comparison would mark the second one as out of stock, which is wrong. A
 substring check handles both.
 
-Note that the original availability text is stored too, in its own column, even
-though in_stock is derived from it. This means the boolean can always be traced
-back to the exact wording the site gave. In the current database every one of
-the 174 rows has availability equal to "In stock", so in_stock is 1 for all 174
-rows.
+**Design decision: the original availability text is stored as well, in its own
+column, even though in_stock is derived from it.** This means the boolean can
+always be traced back to the exact wording the site gave. In the current
+database every one of the 174 rows has availability equal to "In stock", so
+in_stock is 1 for all 174 rows.
 
 There is also a warning branch for wording that mentions neither state.
 
@@ -278,7 +280,7 @@ Real scraping hits messy pages. A tag may be missing, a price may be blank, a
 rating class may say something unexpected. The pipeline is written so that none
 of this crashes the run.
 
-The work happens in two passes.
+**Design decision: the work happens in two passes rather than one.**
 
 Pass 1 tries every conversion and marks whatever fails as None instead of
 raising an error. Pass 2 goes back over those rows and either repairs them or
@@ -295,9 +297,10 @@ The policy is in this table.
 
 Two important points about how the median is built.
 
-Point 1. The median is category-local, not catalogue-wide. It is computed only
-from the successfully parsed rows inside the same category. This matters because
-prices vary a lot between categories. The current medians show why.
+**Design decision 1: the median is category-local, not catalogue-wide.** It is
+computed only from the successfully parsed rows inside the same category. This
+matters because prices vary a lot between categories. The current medians show
+why.
 
 | Category | Median price GBP |
 | --- | --- |
@@ -317,9 +320,9 @@ replacing it with a catalogue-wide figure near 34. The gap between the highest
 and lowest category median is about 16.55 pounds, which is large relative to the
 prices themselves.
 
-Point 2. Every repair is logged. Imputations print a [impute] line, drops print
-a [drop] line, and strange availability text prints a [warn] line. So the run
-output states exactly which rows were changed and why.
+**Design decision 2: every repair is logged.** Imputations print a [impute]
+line, drops print a [drop] line, and strange availability text prints a [warn]
+line. So the run output states exactly which rows were changed and why.
 
 On a clean scrape of the live site none of these lines appear at all. All 174
 rows parse correctly. The behaviour was tested by deliberately corrupting the
@@ -356,10 +359,11 @@ for book in books_data:
     book["price_inr"] = book["price_gbp"] * 105.50
 ```
 
-This is an artificial constant defined by the project for this assignment. It is
-not a live rate and not a historical rate for any particular date. Because it is
-a constant, no external API call is made and no network access is needed for
-this stage, and every run produces the same numbers, which keeps the output
+**Design decision: the rate is a fixed constant, not a live API lookup.** It is
+an artificial constant defined by the project for this assignment. It is not a
+live rate and not a historical rate for any particular date. Because it is a
+constant, no external API call is made and no network access is needed for this
+stage, and every run produces the same numbers, which keeps the output
 reproducible.
 
 Worked examples from the current database.
@@ -372,8 +376,8 @@ Worked examples from the current database.
 | A Murder in Time | 16.64 | 16.64 x 105.50 | 1755.520 |
 | Patience | 10.16 | 10.16 x 105.50 | 1071.880 |
 
-Both currencies are kept in the table so a value can be read in either unit at
-query time without redoing the multiplication in SQL.
+**Design decision: both currencies are kept in the table**, so a value can be
+read in either unit at query time without redoing the multiplication in SQL.
 
 ---
 
@@ -411,23 +415,25 @@ Column by column, the books table looks like this.
 
 The design decisions behind this schema are as follows.
 
+**Design decision: the schema is normalized rather than one flat table.**
 Normalization removes repetition. The word "Mystery" is stored once in the
 categories table rather than 20 times inside the books table. Across all 10
 categories that is 174 repeated strings collapsed into 10 stored strings, and
 renaming a category later is a single row update rather than a bulk update.
 
+**Design decision: the constraint lives in the schema, not in the Python code.**
 The UNIQUE constraint on category_name stops duplicate parent rows from being
 inserted at the schema level instead of relying on the Python code to remember.
 
-Integer join keys are used rather than joining on the category name string.
-Comparing integers is cheaper to index and faster to execute than comparing
-text.
+**Design decision: integer join keys are used rather than joining on the
+category name string.** Comparing integers is cheaper to index and faster to
+execute than comparing text.
 
-in_stock is stored as an INTEGER because SQLite has no dedicated boolean type.
-Python's True and False convert to 1 and 0 at the insertion boundary, which is
-why the query output shows 1 rather than True.
+**Design decision: in_stock is stored as an INTEGER**, because SQLite has no
+dedicated boolean type. Python's True and False convert to 1 and 0 at the
+insertion boundary, which is why the query output shows 1 rather than True.
 
-The tables are dropped and recreated on every run.
+**Design decision: the tables are dropped and recreated on every run.**
 
 ```python
 cursor.execute("DROP TABLE IF EXISTS books")
@@ -439,8 +445,8 @@ runs. The trade off is that no history is kept between executions. That is
 acceptable here because the site is the source of truth and can be rescraped at
 any time.
 
-Every scraped value is passed as a bound parameter, never glued into the SQL
-string.
+**Design decision: every scraped value is passed as a bound parameter, never
+glued into the SQL string.**
 
 ```python
 cursor.execute("INSERT INTO books (title, price_gbp, price_inr, rating, in_stock, availability, category_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -517,10 +523,10 @@ Two counts that the queries in the next section depend on.
 
 ## Section 9 - The SQL Queries
 
-Six queries are run. They run once, after the whole dataset has been loaded and
-committed, not inside the scraping loop. That ordering matters. A query run
-inside the loop would report against a half filled database and give a different
-answer on each iteration.
+Six queries are run. **Design decision: they run once, after the whole dataset
+has been loaded and committed, not inside the scraping loop.** That ordering
+matters. A query run inside the loop would report against a half filled database
+and give a different answer on each iteration.
 
 Here are the six queries and the clauses each one demonstrates.
 
@@ -557,10 +563,10 @@ This walks the foreign key relationship. It starts from the books table, follows
 category_id into the categories table to pick up the readable name, filters on
 that name, and removes any repeated title with DISTINCT.
 
-Every query carries LIMIT 5. This keeps the saved output short enough to read at
-a glance. It also means that what query_outputs.md records is each query's
-complete result set, not a trimmed version of a longer one. Nothing is cut after
-the fact.
+**Design decision: every query carries LIMIT 5.** This keeps the saved output
+short enough to read at a glance. It also means that what query_outputs.md
+records is each query's complete result set, not a trimmed version of a longer
+one. Nothing is cut after the fact.
 
 Note the difference between the row counts. Query 4 has 70 matching rows in the
 database but LIMIT 5 shows five of them. That is the LIMIT doing its job, not a
@@ -605,7 +611,8 @@ merge_join = (merged_books_cat[merged_books_cat["category_name"] == "Mystery"]
               .reset_index(drop=True))
 ```
 
-What makes route 2 possible is one line back in the insert loop.
+**Design decision: the category id is carried onto the in-memory records.** That
+is what makes route 2 possible, and it is one line back in the insert loop.
 
 ```python
 book["category_id"] = category_id
@@ -625,10 +632,11 @@ The two routes line up clause for clause.
 | LIMIT 5 | head(5) |
 | Row numbering of the result | reset_index(drop=True) |
 
-The reset_index step is needed for a technical reason. After filtering, the
-pandas rows keep their original index positions from the merged frame, while the
-SQL result comes back numbered from 0. Without resetting, the values would match
-but the comparison would still report False because the indexes differ.
+**Design decision: reset_index is applied before comparing.** It is needed for a
+technical reason. After filtering, the pandas rows keep their original index
+positions from the merged frame, while the SQL result comes back numbered from
+0. Without resetting, the values would match but the comparison would still
+report False because the indexes differ.
 
 The two results are printed side by side in one frame and compared.
 

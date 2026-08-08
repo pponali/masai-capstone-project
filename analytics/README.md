@@ -104,6 +104,7 @@ df = sns.load_dataset("titanic")
 df.to_csv("titanic.csv", index=False)
 ```
 
+**Design decision: the dataset is saved to CSV immediately after loading.**
 Saving straight after loading is what makes the rest of the module reproducible
 and offline. Anyone grading it can rerun everything from the committed CSV with
 no internet connection.
@@ -136,10 +137,11 @@ The 15 columns break down as follows.
 | alive | text | yes or no, the word form of survived |
 | alone | bool | True when sibsp plus parch is zero |
 
-Several columns are duplicates of each other in a different form. class repeats
-pclass, alive repeats survived, and embark_town repeats embarked. This matters
-later when choosing model features, because feeding both alive and survived to a
-model would hand it the answer directly.
+**Design decision: the duplicate columns are identified up front.** Several
+columns are duplicates of each other in a different form. class repeats pclass,
+alive repeats survived, and embark_town repeats embarked. This matters later
+when choosing model features, because feeding both alive and survived to a model
+would hand it the answer directly.
 
 The fare column was also sorted from highest to lowest to see the spread. The
 three most expensive tickets were all 512.33, while the median fare is 14.45.
@@ -159,7 +161,8 @@ row dataset, are below.
 | embarked | 0.22 | 2 |
 | embark_town | 0.22 | 2 |
 
-A fixed threshold rule decides what happens to each one.
+**Design decision: a fixed threshold rule decides what happens to each column**,
+rather than judging each one case by case.
 
 | Missing percent | Rule |
 | --- | --- |
@@ -176,17 +179,18 @@ Applying that rule gives the following.
 | age | 19.87 | 5 to 30 | Filled with the median, 28.0 | Sits squarely in the impute band. 177 rows is too many to throw away, since that would be a fifth of the dataset. |
 | deck | 77.22 | Above 30 | The whole column dropped | Explained below. |
 
-Age is filled with the median rather than the mean for a specific reason. Age is
-right skewed, with a tail of older passengers pulling the average up. The mean
-age is 29.70 while the median is 28.00. The median is the more typical passenger
-and is not moved by a handful of very old people, so it is the safer filler.
+**Design decision: age is filled with the median rather than the mean.** There
+is a specific reason. Age is right skewed, with a tail of older passengers
+pulling the average up. The mean age is 29.70 while the median is 28.00. The
+median is the more typical passenger and is not moved by a handful of very old
+people, so it is the safer filler.
 
 ```python
 df["age"] = df["age"].fillna(df["age"].median())
 ```
 
-Deck deserves more explanation because two options were considered and both were
-rejected before dropping the column.
+**Design decision: the deck column is dropped entirely.** It deserves more
+explanation, because three other options were considered and rejected first.
 
 | Option | What would happen | Verdict |
 | --- | --- | --- |
@@ -221,8 +225,9 @@ an outlier.
 | age, after imputation | 22.0 | 35.0 | 13.0 | 2.5 | 54.5 | 65 |
 | fare | 7.896 | 31.0 | 23.104 | -26.761 | 65.656 | 114 |
 
-The age row is reported twice on purpose, and the difference between 11 and 65 is
-worth understanding because it is easy to misread.
+**Design decision: the age outlier count is reported twice, before and after
+imputation.** The difference between 11 and 65 is worth understanding because it
+is easy to misread.
 
 Imputing 177 missing ages all at 28.0 dumps a large block of identical values at
 the exact centre of the distribution. That squeezes the quartiles inward, so the
@@ -296,13 +301,14 @@ Survival falls steadily as the class number rises. First class cabins were on th
 upper decks, closer to the lifeboats, and those passengers had priority during
 the evacuation.
 
-A note on reading these numbers carefully. The notebook also prints a second set
-of figures for class, 39.77 for first, 25.44 for second and 34.80 for third.
-Those are a different quantity. They are each class's share of all 342 survivors,
-and they add up to 100 percent. They are not survival rates and they must not be
-read as such, because third class looks better than second in that set purely
-because third class was much larger. The survival rates in the table above are
-the correct comparison.
+**Design decision: survival rate and share of survivors are kept clearly
+separate.** This is worth reading carefully. The notebook also prints a second
+set of figures for class, 39.77 for first, 25.44 for second and 34.80 for third.
+Those are a different quantity. They are each class's share of all 342
+survivors, and they add up to 100 percent. They are not survival rates and they
+must not be read as such, because third class looks better than second in that
+set purely because third class was much larger. The survival rates in the table
+above are the correct comparison.
 
 Part C, survival by sex and class together.
 
@@ -323,10 +329,11 @@ mattered more than class, though both mattered.
 A correlation matrix was then computed on exactly six columns, survived, pclass,
 age, sibsp, parch and fare, and drawn as a heatmap.
 
-The derived flags adult_male and alone were deliberately excluded. adult_male is
-computed from sex and age, and alone is computed from whether sibsp plus parch is
-zero. They are not independent measurements, so including them would report the
-same information twice and inflate the apparent number of relationships.
+**Design decision: the derived flags adult_male and alone are excluded from the
+correlation matrix.** adult_male is computed from sex and age, and alone is
+computed from whether sibsp plus parch is zero. They are not independent
+measurements, so including them would report the same information twice and
+inflate the apparent number of relationships.
 
 The two strongest relationships, ranked by absolute value off the diagonal.
 
@@ -348,6 +355,21 @@ Five charts were produced to tell one connected story.
 | 3 | Box plot | Age distribution split by survival. The two boxes overlap heavily. |
 | 4 | Scatter plot | Age on the x axis, fare on the y axis, coloured by survival. |
 | 5 | Grouped bar chart | Survival rate by sex with class as the hue, the two factors combined. |
+
+Chart 1 puts the survival rate for male and female passengers side by side, and
+the gap is the largest single effect anywhere in this dataset. Women survived at
+74.20 percent against 18.89 percent for men, close to four times the rate. The
+size of that gap is what justifies treating sex as the primary factor for the
+rest of the story. It is consistent with an evacuation that gave priority to
+women and children regardless of anything else.
+
+Chart 2 shows survival rate falling steadily as the class number rises, from
+62.96 percent in first class to 47.28 in second and 24.24 in third. The decline
+is monotonic, meaning every step down in class is also a step down in survival,
+which points at a structural cause rather than chance. First class cabins were
+on the upper decks and therefore physically closer to the lifeboats. Third class
+passengers had further to travel through the ship and met more barriers on the
+way.
 
 Chart 3 is the one that says the least, and that is itself the finding. Survivors
 and non survivors have a very similar spread of ages, so age on its own is a weak
@@ -394,9 +416,9 @@ standard deviation of 49.70 against age's 12.98, so on the raw scale a
 one unit change in fare and a one unit change in age are not comparable at all.
 Models that measure distance or fit coefficients are affected by that imbalance.
 
-This section is an exploratory check only. It does not feed the modeling
-pipeline, which performs its own scaling fitted on the training data alone, for
-the reason given in Section 9.
+**Design decision: this standardization is an exploratory check only.** It does
+not feed the modeling pipeline, which performs its own scaling fitted on the
+training data alone, for the reason given in Section 9.
 
 ---
 
@@ -405,7 +427,8 @@ the reason given in Section 9.
 The data is split into a training set the model learns from and a test set it is
 judged on, in an 80 to 20 ratio, stratified on survived.
 
-Stratification matters here because the target is imbalanced.
+**Design decision: the split is stratified on survived.** Stratification matters
+here because the target is imbalanced.
 
 | Set | Did not survive | Survived |
 | --- | --- | --- |
@@ -420,8 +443,8 @@ one set than the other. That would make recall and F1 on the test set partly an
 accident of the split rather than a property of the model, and rerunning with a
 different random seed would move the scores around for no real reason.
 
-The split happens before any preprocessing. That ordering is not optional and it
-is the subject of the next section.
+**Design decision: the split happens before any preprocessing.** That ordering
+is not optional and it is the subject of the next section.
 
 ---
 
@@ -430,8 +453,8 @@ is the subject of the next section.
 Preprocessing means filling remaining missing values, turning text into numbers
 and putting the numeric columns on a common scale.
 
-The strict rule is that every preprocessing step must be fitted on the training
-data only, and the test data must only be transformed using what was learned from
+**Design decision: every preprocessing step is fitted on the training data
+only,** and the test data must only be transformed using what was learned from
 the training data.
 
 The reason is data leakage. If the median used to fill ages were computed over
@@ -440,8 +463,9 @@ training process. The model would then be evaluated on data it had indirectly
 already seen, and the reported score would be optimistic in a way that would not
 survive contact with genuinely new passengers.
 
-Rather than trusting the code to be written in the right order every time, the
-rule is enforced structurally with a ColumnTransformer inside a Pipeline.
+**Design decision: the no-leakage rule is enforced structurally, with a
+ColumnTransformer inside a Pipeline**, rather than by trusting the code to be
+written in the right order every time.
 
 | Group | Columns | Step 1 | Step 2 |
 | --- | --- | --- | --- |
@@ -451,10 +475,10 @@ rule is enforced structurally with a ColumnTransformer inside a Pipeline.
 The features chosen are pclass, sex, age, sibsp, parch, fare and embarked, and
 the target is survived.
 
-Note which columns are deliberately absent. alive is the word form of survived
-and would hand the model the answer. class duplicates pclass, embark_town
-duplicates embarked, and adult_male and alone are derived from columns already
-included.
+**Design decision: several columns are deliberately left out of the feature
+list.** alive is the word form of survived and would hand the model the answer.
+class duplicates pclass, embark_town duplicates embarked, and adult_male and
+alone are derived from columns already included.
 
 Two settings are worth calling out.
 
@@ -462,10 +486,10 @@ The median strategy is used for age here for the same reason as in Section 3, th
 right skew. The most frequent strategy is used for the categorical columns
 because a median has no meaning for a port code.
 
-handle_unknown='ignore' on the encoder means that a category never seen during
-training produces a row of zeros rather than raising an error. Without it, the
-saved pipeline in Section 15 would crash on a passenger from an unexpected port
-instead of degrading gracefully.
+**Design decision: handle_unknown='ignore' is set on the encoder**, which means
+a category never seen during training produces a row of zeros rather than
+raising an error. Without it, the saved pipeline in Section 15 would crash on a
+passenger from an unexpected port instead of degrading gracefully.
 
 ---
 
@@ -483,9 +507,9 @@ preprocessor so all three saw exactly the same input.
 The decision tree is additionally drawn with plot_tree, with feature names and
 class names labelled so the splits can be read directly off the figure.
 
-Using one shared preprocessor for all three is what makes the comparison fair. If
-each model had its own preprocessing, a difference in scores could come from the
-preprocessing rather than the model.
+**Design decision: one shared preprocessor is used for all three models.** That
+is what makes the comparison fair. If each model had its own preprocessing, a
+difference in scores could come from the preprocessing rather than the model.
 
 ---
 
@@ -556,10 +580,10 @@ Logistic Regression was retrained three ways to compare strategies.
 | class_weight='balanced' | 0.730 | 0.783 | 0.755 |
 | SMOTE | 0.740 | 0.783 | 0.761 |
 
-SMOTE was applied to the training fold only. This is essential. Generating
-synthetic passengers before the split, or on the test set, would put invented
-rows into the evaluation and the resulting score would be measuring the model
-against data that was partly manufactured from the answers.
+**Design decision: SMOTE is applied to the training fold only.** This is
+essential. Generating synthetic passengers before the split, or on the test set,
+would put invented rows into the evaluation and the resulting score would be
+measuring the model against data that was partly manufactured from the answers.
 
 Reading the results, both strategies trade precision for recall and both beat the
 baseline on F1. Recall rises from 0.667 to 0.783 in both cases, meaning roughly
@@ -570,10 +594,10 @@ class_weight='balanced' and SMOTE land very close together at 0.755 and 0.761.
 That is expected, since they attack the same problem from two directions, one by
 reweighting the loss function and the other by adding rows.
 
-Between the two, class_weight='balanced' is the better practical choice. It
-reaches essentially the same result with a single parameter, adds no synthetic
-data, and costs nothing in training time, whereas SMOTE enlarges the training set
-with interpolated passengers who never existed.
+**Design decision: between the two, class_weight='balanced' is the better
+practical choice.** It reaches essentially the same result with a single
+parameter, adds no synthetic data, and costs nothing in training time, whereas
+SMOTE enlarges the training set with interpolated passengers who never existed.
 
 ---
 
@@ -602,10 +626,11 @@ different fifth for validation.
 | Best cross validation score | 0.8189 |
 | OOB score | 0.8188 |
 
-The winning max_depth of 5 is the most informative result here. Unlimited depth
-was among the options and lost, which means the shallower forest generalised
-better. Trees allowed to grow without limit memorise individual passengers rather
-than learning patterns.
+**Design decision: unlimited depth was included in the search and lost.** The
+winning max_depth of 5 is the most informative result here. Unlimited depth was
+among the options and lost, which means the shallower forest generalised better.
+Trees allowed to grow without limit memorise individual passengers rather than
+learning patterns.
 
 The OOB score, or out of bag score, is a second honest estimate obtained for
 free. Each tree in a Random Forest is trained on a random sample of rows, so the
@@ -625,9 +650,9 @@ As a separate task, a multivariate linear regression was built to predict fare
 rather than survival. The features were pclass, sex, age, sibsp, parch and
 embarked.
 
-This task uses its own train and test split, and all of its variables are
-prefixed with fare_ so they cannot overwrite anything belonging to the
-classification pipeline.
+**Design decision: the regression task uses its own train and test split, and
+all of its variables are prefixed with fare_** so they cannot overwrite anything
+belonging to the classification pipeline.
 
 | Metric | Value | What it means |
 | --- | --- | --- |
@@ -678,11 +703,12 @@ Regression metrics.
 | --- | --- | --- | --- | --- |
 | Linear Regression | 20.809 | 30.473 | 0.400 | 0.368 |
 
-The two tables are kept separate on purpose. Classification and regression
-metrics are on completely different scales and measure different things, so no
-number in the first table is comparable to any number in the second.
+**Design decision: the two metric tables are kept separate on purpose.**
+Classification and regression metrics are on completely different scales and
+measure different things, so no number in the first table is comparable to any
+number in the second.
 
-The recommendation is the Decision Tree.
+**Design decision: the recommended model is the Decision Tree.**
 
 | Reason | Detail |
 | --- | --- |
@@ -711,9 +737,9 @@ interpretable tree despite being the more sophisticated method.
 The trained Decision Tree pipeline is saved to disk with joblib.dump as
 titanic_survival_pipeline.pkl.
 
-What is saved is the complete pipeline, the ColumnTransformer with its imputers,
-encoder and scaler together with the fitted DecisionTreeClassifier, as one
-object.
+**Design decision: what is saved is the complete pipeline** — the
+ColumnTransformer with its imputers, encoder and scaler, together with the
+fitted DecisionTreeClassifier, as one object.
 
 Saving the classifier alone would be a mistake. The classifier expects scaled
 numeric columns and one hot encoded categories, so every future caller would have

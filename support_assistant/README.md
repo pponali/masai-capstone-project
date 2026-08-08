@@ -18,6 +18,55 @@ in a fixed JSON shape.
 
 ---
 
+## Architecture - The Whole Pipeline End to End
+
+This is the walkthrough of the four RAG stages in order, naming the file and the
+function that handles each one, and how the data moves between them. Each stage
+is then covered in full in its own numbered section.
+
+| Stage | Handled by | Input it receives | Output it produces |
+| --- | --- | --- | --- |
+| 1. Ingestion | ingest.py, the os.walk loop over docs_dir | The 8 .txt files in docs/ | Raw document text plus the source filename as metadata |
+| 2. Embedding and storage | ingest.py, SentenceTransformer("all-MiniLM-L6-v2") and chromadb.PersistentClient | That raw text | 8 vectors of 384 numbers each, stored in the support_documents collection at chroma_db/ |
+| 3. Retrieval | The retrieve_and_answer node, via collection.query(..., n_results=3) | The user's query, embedded by the same model | The top 3 documents by cosine similarity, plus their source filenames |
+| 4. Generation | retrieve_and_answer and direct_answer, using PROMPT_TEMPLATE in real mode | The retrieved documents and the query | A FinalAnswerSchema object with answer, sources and confidence |
+
+Between stages 2 and 3 sits the router. classify_intent labels the query, and the
+route_intent conditional edge sends it to whichever node should handle it.
+
+Following one query all the way through, the data flows like this.
+
+The caller posts a query to POST /ask in app.py. That builds the initial State
+dictionary and calls graph.invoke. The graph runs classify_intent first, which
+writes an intent onto the state. route_intent reads that intent and picks the
+next node. On the policy branch, retrieve_and_answer embeds the query, searches
+ChromaDB, writes the retrieved documents onto the state and builds the answer.
+On the general branch, direct_answer skips retrieval entirely and writes only an
+answer. Both branches lead to END, and app.py reads the finished state and
+returns query, intent, retrieved_docs and answer to the caller.
+
+**Which stages branch on MOCK_LLM.** Only stages where text would be generated
+branch, which is the classification step inside classify_intent and the
+answer-writing step inside retrieve_and_answer and direct_answer. Ingestion,
+embedding, storage, retrieval and schema validation never branch. They run
+identically in both modes.
+
+| Stage | Default, mock mode | Optional real mode, MOCK_LLM=0 with a key |
+| --- | --- | --- |
+| Ingestion | Reads the 8 files | Identical |
+| Embedding and storage | Local model, no network | Identical |
+| Classification | Keyword heuristic, no model call | Groq llama3-8b-8192 decides the intent |
+| Retrieval | Real cosine search over ChromaDB | Identical, real cosine search |
+| Generation, policy branch | Quotes the first 200 characters of the top document | The model answers from PROMPT_TEMPLATE, validated with up to 2 retries |
+| Generation, general branch | A fixed canned sentence | The model answers directly, with no retrieval context |
+| Schema enforcement | FinalAnswerSchema, populated by our own code | FinalAnswerSchema, validating the model's JSON |
+
+The single point worth repeating is that retrieval is real in both modes. Mock
+mode does not simulate the vector search, it only replaces the writing of the
+final sentence.
+
+---
+
 ## Note - The Markdown Used in This File
 
 Before the sections begin, a short note on how this document is written. Only two
@@ -130,8 +179,8 @@ uvicorn app:app --reload
 The server then listens on http://127.0.0.1:8000 and the interactive docs page is
 at http://127.0.0.1:8000/docs.
 
-Note that ingest.py builds its paths from the location of the file itself, not
-from the folder you happen to be standing in.
+**Design decision: ingest.py builds its paths from the location of the file
+itself, not from the folder you happen to be standing in.**
 
 ```python
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -161,12 +210,13 @@ one covers a single policy area, and each is small, between 58 and 92 words.
 | doc_07.txt | Gift Cards | 86 | Denominations of 100, 250, 500, 1000, valid 1 year, not redeemable for cash |
 | doc_08.txt | Customer Support Hours | 58 | In-app chat 24 by 7, under 2 minute response, no phone support |
 
-Why the documents are this small matters. Each file is a single topic of under
-100 words, which means one file fits comfortably inside a language model prompt
-and does not need to be split into smaller chunks first. In a larger project with
-long PDFs, a chunking step would sit between loading and embedding. Here the
-natural size of the documents makes that step unnecessary, so one file equals one
-stored vector.
+**Design decision: one document equals one stored vector, with no chunking
+step.** Why the documents are this small matters. Each file is a single topic of
+under 100 words, which means one file fits comfortably inside a language model
+prompt and does not need to be split into smaller chunks first. In a larger
+project with long PDFs, a chunking step would sit between loading and embedding.
+Here the natural size of the documents makes that step unnecessary, so one file
+equals one stored vector.
 
 ---
 
@@ -198,12 +248,13 @@ Four things are stored for every document.
 | metadatas | {"source": "doc_05.txt"} | So the answer can cite which file it came from |
 | ids | "1" through "8" | A unique handle for each row in the collection |
 
-The metadata is the piece that makes citation possible. A vector on its own is
-384 numbers with no memory of where it came from. Attaching the filename means
-the API response can list doc_05.txt as a source, which lets a human go and check
-the claim against the real policy text.
+**Design decision: the source filename is stored as metadata alongside the
+vector.** The metadata is the piece that makes citation possible. A vector on
+its own is 384 numbers with no memory of where it came from. Attaching the
+filename means the API response can list doc_05.txt as a source, which lets a
+human go and check the claim against the real policy text.
 
-Before ingesting, the script deletes any existing collection.
+**Design decision: the collection is deleted and rebuilt before every ingest.**
 
 ```python
 try:
@@ -238,24 +289,28 @@ The model used is all-MiniLM-L6-v2.
 | Collection name | support_documents |
 | Rows stored | 8, one per document |
 
-The key property is that similar meanings produce similar vectors. The question
-"How do I stop my order?" contains none of the words in the sentence "Orders can
-be cancelled free of cost before the order status changes to Packed". A plain
-keyword search would find nothing. Because both sentences are about stopping an
-order, their vectors land close together, and the search finds the right document
-anyway. That is the whole reason for using embeddings rather than text matching.
+**Design decision: meaning-based vector search is used instead of keyword
+matching.** The key property is that similar meanings produce similar vectors.
+The question "How do I stop my order?" contains none of the words in the
+sentence "Orders can be cancelled free of cost before the order status changes
+to Packed". A plain keyword search would find nothing. Because both sentences
+are about stopping an order, their vectors land close together, and the search
+finds the right document anyway. That is the whole reason for using embeddings
+rather than text matching.
 
-The client is a PersistentClient rather than an in-memory one, so the vectors are
-written to disk in the chroma_db folder and survive after the process exits.
+**Design decision: the client is a PersistentClient rather than an in-memory
+one**, so the vectors are written to disk in the chroma_db folder and survive
+after the process exits.
 
 ---
 
 ## Section 6 - Stage 3, Intent Classification and Routing
 
-Not every question deserves a document lookup. Asking about the capital of France
-has nothing to do with Zepto policies, and searching the policy corpus for it
-would return three irrelevant documents. So the pipeline decides first what kind
-of question it is.
+**Design decision: retrieval is skipped entirely for questions that are not
+about policy.** Not every question deserves a document lookup. Asking about the
+capital of France has nothing to do with Zepto policies, and searching the
+policy corpus for it would return three irrelevant documents. So the pipeline
+decides first what kind of question it is.
 
 There are exactly two intents.
 
@@ -294,13 +349,13 @@ Each keyword maps onto a document topic, which is why the list has eight entries
 The query is lowercased before the check, so "How do I CANCEL?" and "how do i
 cancel" both classify the same way.
 
-This heuristic is deliberately simple and it has a known limitation. A question
-phrased without any of the eight keywords, for example "how long until my food
-arrives", would be classified as a general question even though doc_01.txt
-answers it directly. The trade off is accepted because it makes the graded
-baseline fully deterministic. The same question always produces the same intent,
-with no API key, no network and no cost. Real LLM mode, described in Section 9,
-removes this limitation.
+**Design decision: the mock classifier is a keyword list, deliberately simple,
+and it has a known limitation.** A question phrased without any of the eight
+keywords, for example "how long until my food arrives", would be classified as a
+general question even though doc_01.txt answers it directly. The trade off is
+accepted because it makes the graded baseline fully deterministic. The same
+question always produces the same intent, with no API key, no network and no
+cost. Real LLM mode, described in Section 9, removes this limitation.
 
 The routing itself is a separate function that reads the intent off the state.
 
@@ -312,9 +367,10 @@ def route_intent(state: State) -> Literal["retrieve_and_answer", "direct_answer"
     return "direct_answer"
 ```
 
-Note that it accepts both "policy_question" and the shorter "policy". That is
-defensive. In real LLM mode a model might reply with just the word policy, and
-this stops that variation from silently falling through to the wrong branch.
+**Design decision: the router accepts both "policy_question" and the shorter
+"policy".** That is defensive. In real LLM mode a model might reply with just
+the word policy, and this stops that variation from silently falling through to
+the wrong branch.
 
 ---
 
@@ -363,11 +419,11 @@ Read as a path, there are exactly two routes through the graph.
 | Policy question | START, classify_intent, retrieve_and_answer, END | Yes |
 | General question | START, classify_intent, direct_answer, END | No |
 
-The important detail is add_conditional_edges rather than add_edge. A normal edge
-always goes to the same next node. A conditional edge calls a function first and
-uses its return value to pick the destination, which is what makes the branch
-possible. The two branches then both end at END, so whichever route is taken, the
-caller gets a completed state back in the same shape.
+**Design decision: add_conditional_edges is used rather than add_edge.** A
+normal edge always goes to the same next node. A conditional edge calls a
+function first and uses its return value to pick the destination, which is what
+makes the branch possible. The two branches then both end at END, so whichever
+route is taken, the caller gets a completed state back in the same shape.
 
 ---
 
@@ -385,12 +441,13 @@ retrieved_docs = collection.query(
 )
 ```
 
-Using the same model for both sides is essential. Two different models produce
-vectors in two different spaces, and comparing across them measures nothing. The
-distances would still be numbers, so the search would return results, but those
-results would be meaningless.
+**Design decision: the query is embedded with the same model that embedded the
+documents.** Using the same model for both sides is essential. Two different
+models produce vectors in two different spaces, and comparing across them
+measures nothing. The distances would still be numbers, so the search would
+return results, but those results would be meaningless.
 
-n_results=3 asks for the top three matches rather than one.
+**Design decision: n_results=3 asks for the top three matches rather than one.**
 
 | Number retrieved | What happens |
 | --- | --- |
@@ -420,13 +477,15 @@ answer_obj = FinalAnswerSchema(
 )
 ```
 
-The first 200 characters of the best matching document are quoted verbatim. There
-is no summarising and no rewording, so the answer cannot contain anything the
-documents do not say. The if docs else guard covers the case of an empty store,
-which would otherwise raise an index error on docs[0].
+**Design decision: in mock mode the top chunk is quoted verbatim, never
+reworded.** The first 200 characters of the best matching document are quoted
+verbatim. There is no summarising and no rewording, so the answer cannot contain
+anything the documents do not say. The if docs else guard covers the case of an
+empty store, which would otherwise raise an index error on docs[0].
 
-Every answer, in both modes and on both branches, is built through
-FinalAnswerSchema. That is what guarantees the response shape is always the same.
+**Design decision: every answer, in both modes and on both branches, is built
+through FinalAnswerSchema.** That is what guarantees the response shape is
+always the same.
 
 | Field | Type | Rule enforced by Pydantic |
 | --- | --- | --- |
@@ -455,9 +514,11 @@ else:
     ...mock path...
 ```
 
-Note the default value "1" in os.getenv. If the variable is never set at all, the
-pipeline runs in mock mode. Note also that real mode requires both the flag and a
-key. Setting MOCK_LLM=0 without a key falls back to mock rather than crashing.
+**Design decision: mock mode is the default and real mode needs both the flag
+and a key.** Note the default value "1" in os.getenv. If the variable is never
+set at all, the pipeline runs in mock mode. Note also that real mode requires
+both the flag and a key. Setting MOCK_LLM=0 without a key falls back to mock
+rather than crashing.
 
 Behaviour side by side.
 
@@ -471,10 +532,11 @@ Behaviour side by side.
 | Needs network | No | Yes |
 | Same output every time | Yes | No |
 
-The single most important line in that table is the retrieval row. Retrieval is
-real in both modes. Mock mode does not fake the vector search, it only replaces
-the writing of the final sentence. So the RAG mechanism being demonstrated is
-genuinely exercised even with no API key present.
+**Design decision: retrieval is real in both modes.** The single most important
+line in that table is the retrieval row. Retrieval is real in both modes. Mock
+mode does not fake the vector search, it only replaces the writing of the final
+sentence. So the RAG mechanism being demonstrated is genuinely exercised even
+with no API key present.
 
 The retry loop in real mode is worth describing because it is what makes schema
 compliance reliable rather than hopeful.
@@ -497,12 +559,14 @@ for attempt in range(3):  # Initial attempt + up to 2 retries
 | 3 | The same again, with the newest error appended |
 | After 3 | Give up and return an error answer with confidence 0.0 |
 
-Two design points here. The failed output is appended back into the conversation
-along with the error text, so the model can see what it produced and precisely
-why it was rejected, rather than being asked to guess again blindly. And the give
-up path still returns a valid FinalAnswerSchema, with confidence set to 0.0
-instead of 1.0. The caller therefore never receives a malformed response, only a
-well formed one that honestly reports low confidence.
+**Design decision: the failed output and the exact validation error are fed back
+into the conversation, and the give-up path still returns a valid schema.** The
+failed output is appended back into the conversation along with the error text,
+so the model can see what it produced and precisely why it was rejected, rather
+than being asked to guess again blindly. And the give up path still returns a
+valid FinalAnswerSchema, with confidence set to 0.0 instead of 1.0. The caller
+therefore never receives a malformed response, only a well formed one that
+honestly reports low confidence.
 
 The request also passes response_format={"type": "json_object"}, which asks the
 Groq API itself to constrain the output to JSON. That reduces how often the retry
@@ -514,7 +578,30 @@ would still fail schema validation.
 ## Section 10 - The Prompt Template
 
 The prompt sent to the model in real mode is built from named sections rather
-than being one long paragraph.
+than being one long paragraph. This is the exact template as it appears in
+ingest.py, not a description of it.
+
+```python
+PROMPT_TEMPLATE = """
+ROLES: You are a Zepto customer support AI assistant. Your job is to answer customer questions about delivery times, refunds, membership, and other standard policies based strictly on the provided documents. When information is unavailable, you must decline to answer rather than guessing or hallucinating.
+CONTEXT: Here are the retrieved documents: {retrieved_documents}  
+TASK: Answer the user's question using only the information in the support documents. Do not use any outside knowledge. If the documents do not contain enough information to answer the question, respond with: "I cannot answer this question using the available documents."
+FORMAT: Return only your final answer. Do not include metadata like document titles or confidence scores unless explicitly asked.
+LENGTH: Keep your response concise, ideally 2–4 sentences.
+
+FEW-SHOT EXAMPLES:
+User: Can I order a pizza from Zepto?
+Response: I cannot answer this question using the available documents.
+
+User: How long do I have to report a damaged item?
+Response: You must report damaged or spoiled items within 24 hours of delivery. Items returned must be unused and in resalable condition, with the exception of items with manufacturing defects. Refunds are processed within 3–5 business days or instantly to your Zepto wallet.
+
+USER QUESTION: {query}
+"""
+```
+
+It follows the role, context, task, format, length skeleton, and each part is
+labelled in the text itself.
 
 | Section | What it does |
 | --- | --- |
@@ -525,7 +612,15 @@ than being one long paragraph.
 | LENGTH | Asks for 2 to 4 sentences |
 | FEW-SHOT EXAMPLES | Two worked examples showing a refusal and a good answer |
 
-The refusal sentence is fixed rather than left to the model's own wording.
+**The negative constraint is the sentence "Do not use any outside knowledge" in
+the TASK section**, reinforced by "based strictly on the provided documents" in
+ROLES. This is the line that turns the model from a general assistant into one
+that is confined to the corpus. Without it a model asked about phone support
+would happily invent a helpline number, because inventing one is more helpful
+sounding than admitting the documents do not mention it.
+
+**Design decision: the refusal sentence is fixed rather than left to the model's
+own wording.**
 
 "I cannot answer this question using the available documents."
 
@@ -533,12 +628,13 @@ Having one exact sentence means a refusal can be detected reliably by a string
 comparison, instead of having to recognise a dozen different ways of phrasing a
 polite no.
 
-The two few shot examples are chosen to teach opposite behaviours. The first,
-about ordering a pizza, shows a question that is out of scope and must be refused
-even though the model certainly knows what a pizza is. The second, about
-reporting a damaged item, shows a correct in scope answer at the right length and
-level of detail. Showing the refusal case first is intentional, because refusing
-is the behaviour a language model is least inclined to do on its own.
+**Design decision: the two few shot examples are chosen to teach opposite
+behaviours, with the refusal shown first.** The first, about ordering a pizza,
+shows a question that is out of scope and must be refused even though the model
+certainly knows what a pizza is. The second, about reporting a damaged item,
+shows a correct in scope answer at the right length and level of detail. Showing
+the refusal case first is intentional, because refusing is the behaviour a
+language model is least inclined to do on its own.
 
 ---
 
@@ -565,10 +661,11 @@ class QueryResponse(BaseModel):
 | retrieved_docs | Full text of the top 3 matches | Whether retrieval found sensible documents |
 | answer | The schema-validated final answer | The reply, its sources and its confidence |
 
-Returning intent and retrieved_docs alongside the answer is a deliberate choice.
-It turns the pipeline from a black box into something inspectable. If an answer
-looks wrong, the response itself shows whether the cause was misclassification or
-poor retrieval, without needing to read the server logs.
+**Design decision: intent and retrieved_docs are returned alongside the
+answer.** This is deliberate. It turns the pipeline from a black box into
+something inspectable. If an answer looks wrong, the response itself shows
+whether the cause was misclassification or poor retrieval, without needing to
+read the server logs.
 
 The endpoint builds the starting state, runs the graph, and packs the result.
 
@@ -582,10 +679,11 @@ else:
     final_answer = FinalAnswerSchema(answer=str(answer_raw), sources=[], confidence=1.0)
 ```
 
-The isinstance check exists because the State type declares answer as
-Union[dict, str]. Normally it is a dictionary produced by model_dump, but the
-branch handles the plain string case as well so an unexpected value is wrapped
-into the schema rather than raising an error at the very last step.
+**Design decision: the isinstance check guards the last step.** It exists
+because the State type declares answer as Union[dict, str]. Normally it is a
+dictionary produced by model_dump, but the branch handles the plain string case
+as well so an unexpected value is wrapped into the schema rather than raising an
+error at the very last step.
 
 The initial state sets intent to "general_question" as a placeholder. That value
 is always overwritten by classify_intent, which is the first node to run, so it
@@ -707,11 +805,13 @@ Line by line.
 | EXPOSE 7860 | Declares the port, which is the port Hugging Face Spaces expects |
 | CMD uvicorn --host 0.0.0.0 | Binds to all interfaces, not 127.0.0.1, otherwise the container would refuse connections from outside itself |
 
-The two details that most often go wrong are both in that table. Copying
-requirements.txt before the rest of the code is what keeps rebuilds fast, since
-Docker reuses the cached install layer whenever the requirements have not
-changed. And binding to 0.0.0.0 rather than the default localhost is what makes
-the published port actually reachable from the host machine.
+**Design decisions: requirements.txt is copied before the code, and uvicorn
+binds to 0.0.0.0.** The two details that most often go wrong are both in that
+table. Copying requirements.txt before the rest of the code is what keeps
+rebuilds fast, since Docker reuses the cached install layer whenever the
+requirements have not changed. And binding to 0.0.0.0 rather than the default
+localhost is what makes the published port actually reachable from the host
+machine.
 
 Build and run.
 
@@ -732,9 +832,10 @@ docker run -p 7860:7860 support-assistant
 | Port | 7860, which is the port Spaces routes to |
 | API key storage | Space secret named GROQ_API_KEY under Settings and Repository Secrets |
 
-The API key is read at runtime with os.getenv and is never written into the code
-or committed to the repository. Because mock mode is the default and needs no
-key, the Space still runs correctly with no secret configured at all.
+**Design decision: the API key is read at runtime with os.getenv and is never
+written into the code or committed to the repository.** Because mock mode is the
+default and needs no key, the Space still runs correctly with no secret
+configured at all.
 
 ---
 
