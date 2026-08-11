@@ -178,6 +178,69 @@ For each book on a page the script captures five things.
 | availability | The p tag with class instock availability |
 | category | The sidebar link text, carried down from the loop |
 
+Here is how each of the five fields is actually pulled out of the HTML.
+
+**Title**
+
+```python
+title = book.find("h3").find("a")["title"]
+```
+
+Every book card is an `article.product_pod`. Its name sits in `<h3><a
+title="...">...</a></h3>`. `find("h3")` locates the heading, `.find("a")`
+locates the link inside it, and `["title"]` reads the `title` attribute off
+that tag rather than the text between the `<a>` and `</a>`.
+
+**Price**
+
+```python
+price_tag = book.find("p", class_="price_color")
+raw_price = price_tag.get_text(strip=True) if price_tag else None
+```
+
+The price is plain text inside `<p class="price_color">£51.77</p>`. `find`
+matches the `<p>` by its `class` attribute - the parameter is spelled
+`class_` with a trailing underscore because `class` is a reserved word in
+Python. Unlike the title, this value is read straight from the visible text
+with `get_text(strip=True)`, since nothing here is truncated.
+
+**Star rating**
+
+```python
+star_rating_classes = book.find("p", class_="star-rating")
+rating_classes = star_rating_classes["class"] if star_rating_classes else []
+```
+
+The site does not print the rating as a number anywhere. It encodes it as a
+second CSS class on the tag, for example `<p class="star-rating Three">`.
+`["class"]` returns that as a list of class names, `["star-rating",
+"Three"]`, because HTML elements can carry more than one class. The word
+`"Three"` is what gets captured here; it is only turned into the integer `3`
+later during cleaning.
+
+**Availability**
+
+```python
+availability = book.find("p", class_="instock availability")
+if availability:
+    availability = availability.get_text(strip=True)
+else:
+    availability = "Not Available"
+```
+
+The stock status lives in `<p class="instock availability">In stock (19
+available)</p>`. Passing `class_="instock availability"` matches that exact
+two-word class string, and the visible text is read directly since it is not
+truncated. If the tag is missing altogether the code falls back to
+`"Not Available"` instead of raising an error.
+
+**Category**
+
+Category is not read per book at all. It comes from the outer loop over the
+sidebar links described above, captured once per category page and then
+attached to every book scraped from that page's listing - this is what "carried
+down from the loop" in the table means.
+
 One detail worth explaining. The title is read from the title attribute and not
 from the visible text of the link.
 
